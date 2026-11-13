@@ -9,6 +9,7 @@ find_package(Threads REQUIRED)
 
 set(SA_CORE_SOURCES
     src/announcer.cpp
+    src/desktop_camera.cpp
     src/fusion_engine.cpp
     src/haptics.cpp
     src/imu_driver.cpp
@@ -45,7 +46,7 @@ else()
 endif()
 
 if(WIN32)
-    target_link_libraries(sa_core PUBLIC ws2_32)
+    target_link_libraries(sa_core PUBLIC ws2_32 sapi ole32 mf mfplat mfreadwrite mfuuid)
 endif()
 
 add_executable(sa_daemon src/main.cpp)

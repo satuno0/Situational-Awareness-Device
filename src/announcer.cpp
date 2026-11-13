@@ -6,6 +6,14 @@
 #include <sstream>
 #include <vector>
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <objbase.h>
+#include <sapi.h>
+#endif
+
 namespace sa {
 namespace {
 
@@ -52,6 +60,68 @@ struct Entry
 };
 
 } // namespace
+
+struct Announcer::SpeechBackend
+{
+#ifdef _WIN32
+    ISpVoice* voice = nullptr;
+    bool owns_com = false;
+
+    ~SpeechBackend()
+    {
+        if (voice)
+        {
+            voice->Speak(L"", SPF_PURGEBEFORESPEAK, nullptr);
+            voice->Release();
+        }
+        if (owns_com) CoUninitialize();
+    }
+
+    bool start(std::string& error)
+    {
+        HRESULT result = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+        if (FAILED(result))
+        {
+            error = "CoInitializeEx failed for Windows speech";
+            return false;
+        }
+        owns_com = true;
+
+        result = CoCreateInstance(CLSID_SpVoice, nullptr, CLSCTX_ALL, IID_ISpVoice,
+                                  reinterpret_cast<void**>(&voice));
+        if (FAILED(result))
+        {
+            std::ostringstream message;
+            message << "cannot create Windows speech voice (HRESULT 0x" << std::hex
+                    << static_cast<unsigned long>(result) << ")";
+            error = message.str();
+            return false;
+        }
+        return true;
+    }
+
+    bool speak(const std::string& text, std::string& error)
+    {
+        const std::wstring wide_text(text.begin(), text.end());
+        const HRESULT result = voice->Speak(wide_text.c_str(), SPF_ASYNC, nullptr);
+        if (SUCCEEDED(result)) return true;
+
+        std::ostringstream message;
+        message << "Windows speech failed (HRESULT 0x" << std::hex
+                << static_cast<unsigned long>(result) << ")";
+        error = message.str();
+        return false;
+    }
+#else
+    bool start(std::string& error)
+    {
+        error = "Windows text-to-speech is available only on Windows";
+        return false;
+    }
+
+    bool speak(const std::string&, std::string&) { return false; }
+#endif
+};
 
 std::string buildAnnouncement(const WorldModel& world, const AnnounceConfig& config)
 {
@@ -144,6 +214,16 @@ bool Announcer::start(std::string& error)
             return false;
         }
     }
+    if (config_.windows_speech)
+    {
+        speech_ = std::make_unique<SpeechBackend>();
+        if (!speech_->start(error))
+        {
+            speech_.reset();
+            if (device_.is_open()) device_.close();
+            return false;
+        }
+    }
     running_ = true;
     last_emit_ms_.reset();
     last_text_.clear();
@@ -153,6 +233,7 @@ bool Announcer::start(std::string& error)
 void Announcer::stop()
 {
     if (device_.is_open()) device_.close();
+    speech_.reset();
     running_ = false;
 }
 
@@ -163,6 +244,12 @@ void Announcer::emit(const std::string& text, uint64_t now_ms)
         device_ << "SAY " << text << "\n";
         device_.flush();
     }
+    if (speech_)
+    {
+        std::string error;
+        if (!speech_->speak(text, error))
+            std::cerr << "[announce] " << error << "\n";
+    }
     last_emit_ms_ = now_ms;
     last_text_ = text;
     if (config_.verbose) std::clog << "[announce] " << text << "\n";
@@ -170,9 +257,12 @@ void Announcer::emit(const std::string& text, uint64_t now_ms)
 
 void Announcer::update(const WorldModel& world, uint64_t now_ms)
 {
-    if (!config_.enabled || !running_) return;
+    announceText(buildAnnouncement(world, config_), now_ms);
+}
 
-    const std::string text = buildAnnouncement(world, config_);
+void Announcer::announceText(const std::string& text, uint64_t now_ms)
+{
+    if (!config_.enabled || !running_) return;
     if (text.empty()) return;
 
     uint64_t required_ms = static_cast<uint64_t>(

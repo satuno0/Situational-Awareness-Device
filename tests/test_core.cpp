@@ -545,6 +545,12 @@ void testAnnouncements()
     announcer.update(scene, 5100);
     check(sayCount() == 3, "announcer speaks a changed scene after the debounce");
 
+    announcer.announceText("Red marker detected 10 degrees to the left.", 5200);
+    check(sayCount() == 3, "custom alerts use the announcer change debounce");
+    announcer.announceText("Red marker detected 10 degrees to the left.", 6100);
+    check(sayCount() == 4 && announcer.lastText() == "Red marker detected 10 degrees to the left.",
+          "announcer emits a debounced custom alert");
+
     announcer.stop();
     std::remove(path.c_str());
 }

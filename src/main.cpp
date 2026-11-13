@@ -1,7 +1,9 @@
 #include "announcer.hpp"
+#include "desktop_camera.hpp"
 #include "fusion_engine.hpp"
 #include "haptics.hpp"
 #include "imu_driver.hpp"
+#include "marker_detector.hpp"
 #include "marker_driver.hpp"
 #include "novelda_driver.hpp"
 #include "playback.hpp"
@@ -45,6 +47,7 @@ struct Options
     bool show_help = false;
     bool simulate = false;
     bool replay = false;
+    bool desktop_demo = false;
     std::string replay_path;
 
     bool record = false;
@@ -101,6 +104,7 @@ void printUsage(const char* program)
         << "Modes:\n"
         << "  (default)              Run from hardware serial/I2C devices\n"
         << "  --simulate             Run deterministic synthetic sensors\n"
+        << "  --desktop-demo         Test webcam red-marker alerts with Windows speech\n"
         << "  --replay <session.bin> Re-run fusion from a recorded raw session\n\n"
         << "Session options:\n"
         << "  --record[=path]        Record raw sensors to session.bin (default path)\n"
@@ -216,6 +220,7 @@ bool parseOptions(int argc, char** argv, Options& options, std::string& error)
 
         if (arg == "--help" || arg == "-h") { options.show_help = true; continue; }
         if (arg == "--simulate") { options.simulate = true; continue; }
+        if (arg == "--desktop-demo") { options.desktop_demo = true; continue; }
         if (arg == "--verify") { options.verify = true; continue; }
         if (arg == "--verbose") { options.verbose = true; continue; }
         if (arg == "--realtime") { options.realtime_sim = true; continue; }
@@ -447,6 +452,16 @@ bool parseOptions(int argc, char** argv, Options& options, std::string& error)
         error = "--simulate and --replay are mutually exclusive";
         return false;
     }
+    if (options.desktop_demo && (options.simulate || options.replay))
+    {
+        error = "--desktop-demo cannot be combined with --simulate or --replay";
+        return false;
+    }
+    if (options.desktop_demo && options.record)
+    {
+        error = "--record is not supported with --desktop-demo";
+        return false;
+    }
     if (options.replay && options.record)
     {
         error = "--record is not supported together with --replay";
@@ -660,7 +675,8 @@ WristTelemetry wristTelemetry(const WristState& state, const WristVibrator& vibr
 AnnounceConfig announceConfig(const Options& options)
 {
     AnnounceConfig config;
-    config.enabled = options.announce;
+    config.enabled = options.announce || options.desktop_demo;
+    config.windows_speech = options.desktop_demo;
     config.device_path = options.announce_device;
     config.min_interval_s = options.announce_interval_s;
     config.repeat_interval_s = options.announce_repeat_s;
@@ -729,11 +745,84 @@ bool startAnnouncer(Announcer& announcer, const Options& options)
         std::cerr << "[sa] announcement warning: " << error << "\n";
         return false;
     }
-    if (options.announce)
+    if (options.desktop_demo)
+        std::cout << "[sa] Windows speech announcements enabled\n";
+    else if (options.announce)
         std::cout << "[sa] announcements enabled"
                   << (options.announce_device.empty() ? " (telemetry only)" : " -> " + options.announce_device)
                   << "\n";
     return true;
+}
+
+int runDesktopDemo(const Options& options, RuntimeContext& runtime)
+{
+#ifndef _WIN32
+    (void)options;
+    (void)runtime;
+    std::cerr << "[sa] --desktop-demo requires Windows\n";
+    return 2;
+#else
+    if (!runtime.announcer.running())
+    {
+        std::cerr << "[sa] desktop demo cannot start without Windows speech\n";
+        return 1;
+    }
+
+    DesktopCamera camera;
+    std::string error;
+    if (!camera.open(error))
+    {
+        std::cerr << "[sa] webcam unavailable: " << error << "\n";
+        return 1;
+    }
+
+    RedMarkerDetector detector;
+    std::vector<uint8_t> pixels;
+    int width = 0;
+    int height = 0;
+    bool marker_was_detected = false;
+    const uint64_t start_ms = monoNowMs();
+    std::cout << "[sa] desktop demo running; show a red marker to the webcam, Ctrl+C to stop\n";
+
+    while (g_running.load())
+    {
+        if (!camera.readRgb(pixels, width, height, error))
+        {
+            std::cerr << "[sa] webcam frame error: " << error << "\n";
+            return 1;
+        }
+
+        const MarkerDetection detection = detector.detect(
+            {pixels.data(), width, height, width * 3});
+        const uint64_t now_ms = monoNowMs();
+        if (detection.valid && !marker_was_detected)
+        {
+            const int bearing_deg = static_cast<int>(std::lround(radToDeg(detection.bearing_rad)));
+            std::string direction = "ahead";
+            if (bearing_deg > 0) direction = "to the left";
+            else if (bearing_deg < 0) direction = "to the right";
+            const std::string message = "Red marker detected " +
+                std::to_string(std::abs(bearing_deg)) + " degrees " + direction + ".";
+            std::cout << "[desktop] " << message << "\n";
+            runtime.announcer.announceText(message, now_ms);
+        }
+        else if (!detection.valid && marker_was_detected)
+        {
+            const std::string message = "Red marker lost.";
+            std::cout << "[desktop] " << message << "\n";
+            runtime.announcer.announceText(message, now_ms);
+        }
+        marker_was_detected = detection.valid;
+
+        if (options.duration_s > 0.0 &&
+            now_ms >= start_ms + static_cast<uint64_t>(options.duration_s * 1000.0))
+            break;
+    }
+
+    camera.close();
+    std::cout << "[sa] desktop demo stopped\n";
+    return 0;
+#endif
 }
 
 void publishAll(const WorldModel& world, const SensorFrame& frame, Telemetry& telemetry, Haptics& haptics,
@@ -1226,18 +1315,30 @@ int main(int argc, char** argv)
     std::signal(SIGINT, handleSignal);
     std::signal(SIGTERM, handleSignal);
 
+#ifndef _WIN32
+    if (options.desktop_demo)
+    {
+        std::cerr << "[sa] --desktop-demo requires Windows\n";
+        return 2;
+    }
+#endif
+
     Telemetry telemetry(telemetryConfig(options));
-    const bool telemetry_ok = startTelemetry(options, telemetry);
+    const bool telemetry_ok = !options.desktop_demo && startTelemetry(options, telemetry);
     Haptics haptics(hapticConfig(options));
-    startHaptics(haptics);
+    if (!options.desktop_demo) startHaptics(haptics);
 
     const WristConfig wrist_config = wristConfig(options);
     RuntimeContext runtime(wrist_config, announceConfig(options));
-    startWrist(runtime.vibrator, options);
-    startAnnouncer(runtime.announcer, options);
+    if (!options.desktop_demo) startWrist(runtime.vibrator, options);
+    const bool announcer_ok = startAnnouncer(runtime.announcer, options);
 
     int result = 0;
-    if (options.replay)
+    if (options.desktop_demo && !announcer_ok)
+        result = 1;
+    else if (options.desktop_demo)
+        result = runDesktopDemo(options, runtime);
+    else if (options.replay)
         result = runReplay(options, telemetry, haptics, telemetry_ok, runtime);
     else if (options.simulate)
         result = runSimulation(options, telemetry, haptics, telemetry_ok, runtime);

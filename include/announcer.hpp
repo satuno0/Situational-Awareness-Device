@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <fstream>
+#include <memory>
 #include <optional>
 #include <string>
 
@@ -13,6 +14,7 @@ namespace sa {
 struct AnnounceConfig
 {
     bool enabled = false;
+    bool windows_speech = false;
     // Line-oriented speaker/earpiece bridge. Each announcement is written as
     // "SAY <text>\n". An empty path keeps the logic active for telemetry and
     // tests but writes no hardware.
@@ -49,13 +51,18 @@ public:
     // Emits at most one line, with a short debounce for changes and a longer
     // repeat interval for an unchanged scene.
     void update(const WorldModel& world, uint64_t now_ms);
+    // Emits a caller-provided alert using the same output and debounce policy.
+    void announceText(const std::string& text, uint64_t now_ms);
 
     const std::string& lastText() const { return last_text_; }
 
 private:
+    struct SpeechBackend;
+
     void emit(const std::string& text, uint64_t now_ms);
 
     AnnounceConfig config_;
+    std::unique_ptr<SpeechBackend> speech_;
     std::ofstream device_;
     bool running_ = false;
     std::optional<uint64_t> last_emit_ms_;

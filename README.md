@@ -93,13 +93,13 @@ translation unit.
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j
-ctest --test-dir build --output-on-failure
+cmake --build build --config Release
+ctest --test-dir build -C Release --output-on-failure
 ```
 
 This produces `build/sa_daemon` (`build/sa_daemon.exe` on Windows) and
-`build/sa_tests`. CTest runs the core tests plus a simulate/record/replay
-verification pair.
+the test executables. CTest runs the core tests, DXF parser test, and a
+simulate/record/replay verification pair.
 
 ### Direct compiler commands
 
@@ -114,21 +114,16 @@ g++ -std=c++20 -O2 -Wall -Wextra -Iinclude \
     tests/test_core.cpp -o sa_tests -pthread
 ```
 
-Windows with MinGW-w64 (PowerShell):
+Windows (PowerShell):
 
 ```powershell
-$core = Get-ChildItem src\*.cpp | ForEach-Object FullName
-g++ -std=c++20 -O2 -Wall -Wextra -Iinclude $core -o build\sa_daemon.exe -lws2_32
-
-$testCore = Get-ChildItem src\*.cpp |
-    Where-Object Name -ne 'main.cpp' |
-    ForEach-Object FullName
-g++ -std=c++20 -O2 -Wall -Wextra -Iinclude $testCore tests\test_core.cpp `
-    -o build\sa_tests.exe -lws2_32
+cmake -S . -B build
+cmake --build build --config Release
+ctest --test-dir build -C Release --output-on-failure
 ```
 
-Run the tests with `./sa_tests` or `build\sa_tests.exe`. A successful run ends
-with `all core tests passed`.
+The Windows build links Media Foundation and SAPI for the optional desktop
+webcam/TTS test mode.
 
 ## Running
 
@@ -344,6 +339,16 @@ the detector, hysteresis, recording, replay, and telemetry paths are testable
 without them. The simulation emits a synthetic marker by default; use
 `--no-marker-sim` to disable it. Marker observations are recorded and replayed.
 
+On Windows, `--desktop-demo` opens the first available webcam through Media
+Foundation and runs the red-marker detector on live RGB frames. It speaks
+marker-found and marker-lost transitions through the Windows default audio
+device using SAPI text-to-speech. Use `--duration <seconds>` to end the demo
+automatically; otherwise press Ctrl+C.
+
+```powershell
+build\sa_daemon.exe --desktop-demo --duration 30
+```
+
 ## Spoken announcements
 
 `--announce` enables deterministic, line-oriented speech. With
@@ -356,6 +361,7 @@ SAY Unit 5 meters ahead.
 An external TTS process or earpiece firmware owns the actual audio. Without a
 device path the logic still runs and the current sentence is exposed through
 telemetry (useful for testing and for a browser-side speaker).
+The Windows desktop demo enables built-in SAPI speech automatically.
 
 `buildAnnouncement` sorts tracks by range and states the count, type, distance,
 and world-relative bearing. Examples:
