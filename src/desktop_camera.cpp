@@ -87,8 +87,13 @@ bool DesktopCamera::open(std::string& error)
     CoTaskMemFree(devices);
     if (FAILED(result)) return fail(hresultText("Open the default webcam", result));
 
+    Microsoft::WRL::ComPtr<IMFAttributes> reader_attributes;
+    result = MFCreateAttributes(reader_attributes.GetAddressOf(), 1);
+    if (FAILED(result)) return fail(hresultText("Create webcam reader settings", result));
+    result = reader_attributes->SetUINT32(MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, TRUE);
+    if (FAILED(result)) return fail(hresultText("Enable webcam video processing", result));
     result = MFCreateSourceReaderFromMediaSource(
-        impl_->source.Get(), nullptr, impl_->reader.GetAddressOf());
+        impl_->source.Get(), reader_attributes.Get(), impl_->reader.GetAddressOf());
     if (FAILED(result)) return fail(hresultText("Create webcam frame reader", result));
 
     Microsoft::WRL::ComPtr<IMFMediaType> output_type;
@@ -96,7 +101,7 @@ bool DesktopCamera::open(std::string& error)
     if (FAILED(result)) return fail(hresultText("Create webcam output format", result));
     result = output_type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
     if (FAILED(result)) return fail(hresultText("Set webcam output type", result));
-    result = output_type->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB24);
+    result = output_type->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32);
     if (FAILED(result)) return fail(hresultText("Set webcam RGB format", result));
     result = impl_->reader->SetCurrentMediaType(
         static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), nullptr, output_type.Get());
@@ -109,7 +114,7 @@ bool DesktopCamera::open(std::string& error)
     result = MFGetAttributeSize(current_type.Get(), MF_MT_FRAME_SIZE,
                                 &impl_->width, &impl_->height);
     if (FAILED(result) || impl_->width == 0 || impl_->height == 0 ||
-        impl_->width > static_cast<UINT32>(std::numeric_limits<int>::max() / 3) ||
+        impl_->width > static_cast<UINT32>(std::numeric_limits<int>::max() / 4) ||
         impl_->height > static_cast<UINT32>(std::numeric_limits<int>::max()))
         return fail("webcam returned invalid frame dimensions");
 
@@ -122,7 +127,7 @@ bool DesktopCamera::open(std::string& error)
     else
     {
         result = MFGetStrideForBitmapInfoHeader(
-            MFVideoFormat_RGB24.Data1, impl_->width, &impl_->stride);
+            MFVideoFormat_RGB32.Data1, impl_->width, &impl_->stride);
         if (FAILED(result)) return fail(hresultText("Determine webcam frame stride", result));
     }
     if (impl_->stride == 0)
@@ -200,9 +205,9 @@ bool DesktopCamera::readRgb(std::vector<uint8_t>& pixels, int& width, int& heigh
 
     const std::size_t row_stride = static_cast<std::size_t>(
         impl_->stride < 0 ? -static_cast<int64_t>(impl_->stride) : impl_->stride);
-    const std::size_t row_bytes = static_cast<std::size_t>(impl_->width) * 3u;
+    const std::size_t source_row_bytes = static_cast<std::size_t>(impl_->width) * 4u;
     const std::size_t required_bytes = row_stride * static_cast<std::size_t>(impl_->height);
-    if (!source_pixels || row_stride < row_bytes || current_length > maximum_length ||
+    if (!source_pixels || row_stride < source_row_bytes || current_length > maximum_length ||
         current_length < required_bytes)
     {
         buffer->Unlock();
@@ -222,8 +227,8 @@ bool DesktopCamera::readRgb(std::vector<uint8_t>& pixels, int& width, int& heigh
             static_cast<std::size_t>(y) * static_cast<std::size_t>(width) * 3u;
         for (int x = 0; x < width; ++x)
         {
-            const std::size_t source_index = static_cast<std::size_t>(x) * 3u;
-            const std::size_t output_index = source_index;
+            const std::size_t source_index = static_cast<std::size_t>(x) * 4u;
+            const std::size_t output_index = static_cast<std::size_t>(x) * 3u;
             output_row[output_index] = source_row[source_index + 2];
             output_row[output_index + 1] = source_row[source_index + 1];
             output_row[output_index + 2] = source_row[source_index];
