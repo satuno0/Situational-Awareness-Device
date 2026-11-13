@@ -54,8 +54,13 @@ target_link_libraries(sa_daemon PRIVATE sa_core)
 add_executable(sa_tests tests/test_core.cpp)
 target_link_libraries(sa_tests PRIVATE sa_core)
 
+add_executable(sa_dxf_tests tests/test_dxf.cpp)
+target_link_libraries(sa_dxf_tests PRIVATE sa_core)
+
 enable_testing()
 add_test(NAME sa_core_tests COMMAND sa_tests)
+add_test(NAME sa_dxf_parser
+         COMMAND sa_dxf_tests "${CMAKE_CURRENT_SOURCE_DIR}/schematics/SA Project_Box Outline.dxf")
 
 # End-to-end check: record a short deterministic simulation, then regenerate
 # every tracked/world snapshot from the raw sensor records.

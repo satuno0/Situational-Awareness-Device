@@ -72,12 +72,13 @@ include/                 Public interfaces and core data types
   wrist_haptics.hpp      Wrist aim hysteresis and actuator output
   announcer.hpp          Deterministic spoken track summaries
   sensor_mode.hpp        Sensor preset/list parsing and frame filtering
-  schematic.hpp          Text floor-plan parser and occupancy prior
+  schematic.hpp          Text/DXF floor-plan parser and occupancy prior
   simulation.hpp         Deterministic synthetic sensor source
   serial_port.hpp        Cross-platform serial port abstraction
   serialization.hpp      Binary encoding helpers and CRC32
 src/                     Implementations of every header above, plus main.cpp
 tests/test_core.cpp      Behavioral and replay-determinism tests
+tests/test_dxf.cpp       DXF schematic parser test
 web/index.html           Phone-friendly live visualization
 maps/example_sa.txt      Example text schematic
 CMakeLists.txt           Library, daemon, tests, and CTest definitions
@@ -235,7 +236,7 @@ Perception / audio / map:
   --announce-device <path>   Speaker bridge (writes SAY <text> lines)
   --announce-interval <s>    Debounce for changed scenes (default 1.5)
   --announce-repeat <s>      Repeat unchanged summaries (default 8)
-  --map <file>               Load a text floor plan as a structural prior
+  --map <file>               Load a text or ASCII DXF floor plan as a prior
 
 Hardware:
   --radar-data <dev>         IWR6843 data port
@@ -400,9 +401,11 @@ was skipped rather than pretending the changed output is a failure.
 
 ## Schematics and map upload
 
-`--map <file>` loads a text floor plan as a structural prior. The format is
-small and debuggable because PDF, DXF, and raster parsing are out of scope.
-Convert a real floor plan to this text first.
+`--map <file>` loads a text floor plan or an ASCII DXF as a structural prior.
+DXF input supports `LINE` and straight-segment `LWPOLYLINE` entities, with
+coordinates converted to metres using `$INSUNITS`. Curved polyline segments
+are rejected rather than approximated. PDF and raster parsing are not
+supported.
 
 ```
 # maps/example_sa.txt
@@ -656,9 +659,10 @@ tracks, grid, and confidence values.
 - Red-marker detection is a simple red-dominance blob detector. Strong red
   lighting, reflective tape, or tiny markers can produce false results; it is a
   cue, not a certified targeting system.
-- Schematic parsing supports only the documented text format. PDF, DXF, raster
-  images, and lidar scans are not parsed. There is no lidar driver, and a
-  schematic alone cannot discover rooms that were never described.
+- DXF schematic parsing supports ASCII `LINE` and straight-segment
+  `LWPOLYLINE` entities only. PDF, raster images, and lidar scans are not
+  parsed. There is no lidar driver, and a schematic alone cannot discover
+  rooms that were never described.
 - There is no global map-to-layout registration. Schematic coordinates must
   already align with the device's world frame (the frame in which the device
   starts near the plan origin); slowly drifting yaw will visibly offset the plan

@@ -14,9 +14,8 @@ struct SchematicMark
     std::string name;
 };
 
-// Operator-supplied floor plan. The text format is deliberately small and
-// debuggable; PDF, DXF and raster images are not parsed. Convert those to this
-// format (or export a vector floor plan) before loading.
+// Operator-supplied floor plan. loadFile also accepts ASCII DXF LINE and
+// straight-segment LWPOLYLINE entities.
 //
 //   # comment
 //   origin 0 0            schematic origin in world metres
@@ -75,6 +74,7 @@ private:
     };
 
     void transformPoint(const RawPoint& raw, Vec3& world) const;
+    bool loadDxfText(const std::string& text, std::string& error);
 
     float origin_x_ = 0.0f;
     float origin_y_ = 0.0f;
