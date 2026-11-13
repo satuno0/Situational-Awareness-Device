@@ -1,0 +1,50 @@
+# Build output
+build/
+builds/
+out/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+Testing/
+install_manifest.txt
+Makefile
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+*.dll
+*.exe
+*.pdb
+*.ilk
+
+# Recorded sessions and test artifacts
+*.bin
+*.sess
+session*.bin
+ctest_session*.bin
+demo*.bin
+*.log
+
+# Editor and IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.cproject
+*.user
+*.suo
+
+# OS metadata
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local tooling
+compile_commands.json
+.cache/

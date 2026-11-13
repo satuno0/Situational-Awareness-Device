@@ -1,0 +1,637 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b1117">
+<title>SA device - live situational awareness</title>
+<style>
+  :root {
+    --bg: #0b1117;
+    --panel: #111b24;
+    --panel-2: #16232e;
+    --line: #233442;
+    --text: #d9e6ef;
+    --muted: #7c94a5;
+    --safe: #52d68a;
+    --unknown: #ffb454;
+    --presence: #c58aff;
+    --radar: #5ec8ff;
+    --danger: #ff6b6b;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); }
+  body {
+    font-family: ui-monospace, "SF Mono", "Cascadia Mono", Consolas, monospace;
+    -webkit-text-size-adjust: 100%;
+    overflow: hidden;
+  }
+  #app { display: flex; flex-direction: column; height: 100dvh; }
+  header {
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px 14px calc(10px + env(safe-area-inset-top));
+    border-bottom: 1px solid var(--line); background: #0e1720;
+  }
+  header h1 { font-size: 14px; margin: 0; letter-spacing: 0.12em; font-weight: 600; }
+  header .sub { color: var(--muted); font-size: 11px; margin-left: auto; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--danger); box-shadow: 0 0 10px currentColor; }
+  .dot.online { background: var(--safe); }
+  main { flex: 1; display: grid; grid-template-columns: minmax(0, 1fr) 320px; min-height: 0; }
+  .map-wrap { position: relative; min-height: 0; padding: 8px; }
+  canvas { width: 100%; height: 100%; display: block; border-radius: 12px; background: #081016; touch-action: none; }
+  .legend {
+    position: absolute; left: 18px; bottom: 18px; background: rgba(8, 16, 22, 0.82);
+    border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; font-size: 11px;
+    display: grid; gap: 5px; backdrop-filter: blur(6px);
+  }
+  .legend span { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); }
+  .swatch { width: 9px; height: 9px; border-radius: 50%; }
+  aside {
+    border-left: 1px solid var(--line); overflow-y: auto; padding: 12px; display: grid;
+    gap: 10px; align-content: start; background: #0d151c;
+  }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; }
+  .card h2 { margin: 0 0 8px; font-size: 10px; color: var(--muted); letter-spacing: 0.16em; text-transform: uppercase; font-weight: 600; }
+  .big { font-size: 26px; font-variant-numeric: tabular-nums; }
+  .row { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; padding: 2px 0; }
+  .row .k { color: var(--muted); }
+  .row .v { text-align: right; font-variant-numeric: tabular-nums; }
+  .bar { height: 6px; background: #0a1218; border-radius: 4px; overflow: hidden; margin-top: 8px; }
+  .bar > i { display: block; height: 100%; background: linear-gradient(90deg, #2c8bff, #52d68a); width: 0; transition: width 0.2s; }
+  .chips { display: flex; flex-wrap: wrap; gap: 5px; }
+  .chip { font-size: 10px; border-radius: 999px; padding: 3px 7px; border: 1px solid var(--line); color: var(--muted); }
+  .chip.ok { color: var(--safe); border-color: #25563a; background: #10291c; }
+  .track { border-top: 1px solid var(--line); padding-top: 8px; margin-top: 8px; font-size: 12px; }
+  .track:first-of-type { border-top: 0; margin-top: 0; padding-top: 0; }
+  .track .head { display: flex; justify-content: space-between; align-items: baseline; }
+  .tag { font-size: 9px; letter-spacing: 0.08em; color: var(--muted); }
+  .empty { color: var(--muted); font-size: 12px; }
+  .safe { color: var(--safe); }
+  .unknown { color: var(--unknown); }
+  .presence { color: var(--presence); }
+  .buzz { color: var(--danger); }
+  .aim { color: var(--unknown); }
+  textarea {
+    width: 100%; min-height: 74px; margin-top: 8px; resize: vertical;
+    background: #0a1218; color: var(--text); border: 1px solid var(--line);
+    border-radius: 8px; padding: 7px 8px; font: 11px/1.45 ui-monospace, monospace;
+  }
+  .upload-row { display: flex; gap: 6px; margin-top: 6px; align-items: center; }
+  .upload-row input[type=file] { flex: 1; min-width: 0; font-size: 10px; color: var(--muted); }
+  .upload-row button {
+    font: 11px ui-monospace, monospace; color: var(--text); background: var(--panel-2);
+    border: 1px solid var(--line); border-radius: 8px; padding: 6px 9px; cursor: pointer;
+  }
+  .upload-row button:active { background: #1d3140; }
+  @media (max-width: 760px) {
+    main { grid-template-columns: 1fr; grid-template-rows: minmax(0, 1fr) auto; }
+    aside { border-left: 0; border-top: 1px solid var(--line); max-height: 42dvh; grid-template-columns: 1fr 1fr; padding-bottom: calc(12px + env(safe-area-inset-bottom)); }
+    .legend { font-size: 10px; left: 14px; bottom: 14px; }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <div class="dot" id="link"></div>
+    <h1>SA DEVICE</h1>
+    <div class="sub" id="clock">waiting for telemetry</div>
+  </header>
+  <main>
+    <div class="map-wrap">
+      <canvas id="map"></canvas>
+      <div class="legend">
+        <span><i class="swatch" style="background:var(--safe)"></i>safe tag</span>
+        <span><i class="swatch" style="background:var(--unknown)"></i>unknown person</span>
+        <span><i class="swatch" style="background:var(--presence)"></i>presence only</span>
+        <span><i class="swatch" style="background:var(--radar)"></i>occupancy / structure</span>
+        <span><i class="swatch" style="background:var(--danger)"></i>red marker</span>
+      </div>
+    </div>
+    <aside>
+      <section class="card">
+        <h2>Environment</h2>
+        <div class="big" id="env">--</div>
+        <div class="bar"><i id="envbar"></i></div>
+        <div class="row" style="margin-top:8px"><span class="k">occupied cells</span><span class="v" id="occupied">--</span></div>
+        <div class="row"><span class="k">presence zones</span><span class="v" id="zones">--</span></div>
+      </section>
+
+      <section class="card">
+        <h2>Pose</h2>
+        <div class="row"><span class="k">x / y</span><span class="v" id="pose">--</span></div>
+        <div class="row"><span class="k">yaw</span><span class="v" id="yaw">--</span></div>
+        <div class="row"><span class="k">timestamp</span><span class="v" id="timestamp">--</span></div>
+      </section>
+
+      <section class="card">
+        <h2>Sensors</h2>
+        <div class="chips" id="health"></div>
+      </section>
+
+      <section class="card">
+        <h2>Red marker / wrist</h2>
+        <div class="row"><span class="k">marker</span><span class="v" id="marker">--</span></div>
+        <div class="row"><span class="k">bearing</span><span class="v" id="mbearing">--</span></div>
+        <div class="row"><span class="k">wrist</span><span class="v" id="wrist">--</span></div>
+        <div class="row"><span class="k">confidence</span><span class="v" id="mconfidence">--</span></div>
+      </section>
+
+      <section class="card">
+        <h2>Map / schematic</h2>
+        <div class="row"><span class="k">walls</span><span class="v" id="walls">--</span></div>
+        <div class="row"><span class="k">rooms</span><span class="v" id="rooms">--</span></div>
+        <div class="row"><span class="k">objects</span><span class="v" id="objects">--</span></div>
+        <textarea id="mapText" spellcheck="false" placeholder="origin 0 0&#10;wall -4 -3 4 -3&#10;room Kitchen -4 -3 0 2&#10;label Ladder 2.5 1.0"></textarea>
+        <div class="upload-row">
+          <input type="file" id="mapFile" accept=".txt,.map,text/plain">
+          <button id="mapSend">Load schematic</button>
+        </div>
+        <div class="empty" id="mapStatus">Text floor plans only. PDF/DXF/image files are not parsed.</div>
+      </section>
+
+      <section class="card">
+        <h2>Perception / audio</h2>
+        <div class="row"><span class="k">sensor mode</span><span class="v" id="sensorMode">--</span></div>
+        <div class="row" style="align-items:flex-start"><span class="k">announcement</span><span class="v" id="announcement" style="max-width:70%">--</span></div>
+      </section>
+
+      <section class="card">
+        <h2>Tracks <span id="trackcount" style="color:var(--text)"></span></h2>
+        <div id="tracks" class="empty">no tracks</div>
+      </section>
+    </aside>
+  </main>
+</div>
+<script>
+(function () {
+  "use strict";
+  const stateUrl = "/api/state";
+  const gridUrl = "/api/grid";
+  const canvas = document.getElementById("map");
+  const ctx = canvas.getContext("2d");
+
+  let state = null;
+  let grid = null;
+  let gridImage = null;
+  let dirty = true;
+  let dpr = 1;
+  let cssSize = 0;
+
+  const colors = {
+    SAFE_TAGGED: getComputedStyle(document.documentElement).getPropertyValue("--safe").trim(),
+    UNKNOWN_PERSON: getComputedStyle(document.documentElement).getPropertyValue("--unknown").trim(),
+    PRESENCE_ONLY: getComputedStyle(document.documentElement).getPropertyValue("--presence").trim()
+  };
+
+  function resize() {
+    dpr = Math.min(window.devicePixelRatio || 1, 2.5);
+    const rect = canvas.getBoundingClientRect();
+    cssSize = Math.max(120, Math.min(rect.width, rect.height));
+    canvas.width = Math.round(cssSize * dpr);
+    canvas.height = Math.round(cssSize * dpr);
+    dirty = true;
+  }
+
+  function decodeBase64(text) {
+    const binary = atob(text);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes;
+  }
+
+  function buildGridImage(g) {
+    const off = document.createElement("canvas");
+    off.width = g.width;
+    off.height = g.height;
+    const octx = off.getContext("2d");
+    const image = octx.createImageData(g.width, g.height);
+    let bytes;
+    try { bytes = decodeBase64(g.data); } catch (e) { return null; }
+    if (bytes.length < g.width * g.height) return null;
+    for (let i = 0; i < g.width * g.height; i++) {
+      const p = bytes[i] / 255;
+      const o = i * 4;
+      if (p >= 0.55) {
+        const a = Math.min(1, (p - 0.55) / 0.40);
+        image.data[o] = 92;
+        image.data[o + 1] = 196;
+        image.data[o + 2] = 255;
+        image.data[o + 3] = Math.round(40 + 190 * a);
+      } else if (p <= 0.45) {
+        const a = Math.min(1, (0.45 - p) / 0.40);
+        image.data[o] = 18;
+        image.data[o + 1] = 52;
+        image.data[o + 2] = 70;
+        image.data[o + 3] = Math.round(20 + 90 * a);
+      } else {
+        image.data[o + 3] = 0;
+      }
+    }
+    octx.putImageData(image, 0, 0);
+    return off;
+  }
+
+  function view() {
+    const yaw = state ? (state.pose.yaw_deg * Math.PI / 180) : 0;
+    const px = state ? state.pose.x : 0;
+    const py = state ? state.pose.y : 0;
+    const range = 11.0;
+    const scale = cssSize / (2 * range);
+    const center = cssSize / 2;
+    const c = Math.cos(yaw);
+    const s = Math.sin(yaw);
+    const m11 = s * scale;
+    const m21 = -c * scale;
+    const m12 = -c * scale;
+    const m22 = -s * scale;
+    const dx = center - m11 * px - m21 * py;
+    const dy = center - m12 * px - m22 * py;
+    return { yaw, px, py, scale, center, m11, m12, m21, m22, dx, dy, c, s };
+  }
+
+  function worldToScreen(v, x, y) {
+    const wx = x - v.px;
+    const wy = y - v.py;
+    const forward = wx * v.c + wy * v.s;
+    const left = -wx * v.s + wy * v.c;
+    return [v.center - left * v.scale, v.center - forward * v.scale];
+  }
+
+  function setScreenTransform() {
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  function setWorldTransform(v) {
+    ctx.setTransform(
+      dpr * v.m11, dpr * v.m12,
+      dpr * v.m21, dpr * v.m22,
+      dpr * v.dx, dpr * v.dy
+    );
+  }
+
+  function drawRings(v) {
+    setScreenTransform();
+    ctx.save();
+    ctx.strokeStyle = "rgba(94,200,255,0.13)";
+    ctx.lineWidth = 1;
+    for (const r of [2, 5, 8, 11]) {
+      ctx.beginPath();
+      ctx.arc(v.center, v.center, r * v.scale, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.fillStyle = "rgba(124,148,165,0.55)";
+      ctx.font = "9px ui-monospace, monospace";
+      ctx.fillText(r + " m", v.center + 3, v.center - r * v.scale + 10);
+    }
+    ctx.restore();
+  }
+
+  function drawWorld(v) {
+    setWorldTransform(v);
+    ctx.imageSmoothingEnabled = false;
+
+    if (gridImage && grid) {
+      const halfW = grid.width * grid.cell_size / 2;
+      const halfH = grid.height * grid.cell_size / 2;
+      ctx.globalAlpha = 1;
+      ctx.drawImage(gridImage, grid.origin_x, grid.origin_y, halfW * 2, halfH * 2);
+    }
+
+    if (state) {
+      for (const zone of state.presence_zones || []) {
+        const a0 = v.yaw + zone.bearing_center_rad - zone.bearing_width_rad / 2;
+        const a1 = v.yaw + zone.bearing_center_rad + zone.bearing_width_rad / 2;
+        ctx.beginPath();
+        ctx.arc(v.px, v.py, zone.range_max, a0, a1);
+        ctx.arc(v.px, v.py, zone.range_min, a1, a0, true);
+        ctx.closePath();
+        ctx.fillStyle = "rgba(197,138,255,0.14)";
+        ctx.fill();
+        ctx.strokeStyle = "rgba(197,138,255,0.45)";
+        ctx.lineWidth = 0.05;
+        ctx.stroke();
+      }
+
+      ctx.fillStyle = "rgba(120,190,220,0.65)";
+      for (const object of state.map || []) {
+        const p = object.position;
+        ctx.fillRect(p.x - 0.13, p.y - 0.13, 0.26, 0.26);
+      }
+
+      // Operator-supplied schematic structure sits above the sensor grid so a
+      // conflict between prior and measurement is visually obvious.
+      for (const room of state.rooms || []) {
+        const w = room.max_x - room.min_x;
+        const h = room.max_y - room.min_y;
+        ctx.fillStyle = "rgba(94,200,255,0.06)";
+        ctx.fillRect(room.min_x, room.min_y, w, h);
+        ctx.strokeStyle = "rgba(94,200,255,0.22)";
+        ctx.lineWidth = 0.04;
+        ctx.strokeRect(room.min_x, room.min_y, w, h);
+      }
+
+      ctx.lineCap = "round";
+      ctx.strokeStyle = "rgba(150,205,235,0.55)";
+      ctx.lineWidth = 0.07;
+      for (const wall of state.walls || []) {
+        ctx.beginPath();
+        ctx.moveTo(wall[0], wall[1]);
+        ctx.lineTo(wall[2], wall[3]);
+        ctx.stroke();
+      }
+    }
+  }
+
+  function drawRoomLabels(v) {
+    setScreenTransform();
+    if (!state) return;
+    ctx.save();
+    ctx.font = "9px ui-monospace, monospace";
+    ctx.fillStyle = "rgba(160,205,230,0.7)";
+    for (const room of state.rooms || []) {
+      const cx = (room.min_x + room.max_x) / 2;
+      const cy = (room.min_y + room.max_y) / 2;
+      const [sx, sy] = worldToScreen(v, cx, cy);
+      const text = room.name || "";
+      if (!text) continue;
+      ctx.fillText(text, sx - ctx.measureText(text).width / 2, sy);
+    }
+    ctx.restore();
+  }
+
+  function drawTracks(v) {
+    setScreenTransform();
+    if (!state) return;
+    const tracks = state.tracks || [];
+    for (const track of tracks) {
+      const p = track.position;
+      const [sx, sy] = worldToScreen(v, p.x, p.y);
+      const color = colors[track.classification] || colors.UNKNOWN_PERSON;
+      const sigma = Math.max(0.16, Math.min(2.5, track.position_sigma_m || 0.3));
+      const r = sigma * v.scale;
+
+      ctx.beginPath();
+      ctx.arc(sx, sy, r, 0, Math.PI * 2);
+      ctx.fillStyle = color + "22";
+      ctx.fill();
+      ctx.strokeStyle = color + "66";
+      ctx.lineWidth = 1;
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.arc(sx, sy, 5, 0, Math.PI * 2);
+      ctx.fillStyle = color;
+      ctx.fill();
+      ctx.strokeStyle = "#081016";
+      ctx.lineWidth = 2;
+      ctx.stroke();
+
+      if (track.visible) {
+        ctx.beginPath();
+        ctx.arc(sx, sy, 8.5, 0, Math.PI * 2);
+        ctx.strokeStyle = color + "aa";
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      }
+
+      const vel = track.velocity || { x: 0, y: 0 };
+      const vf = vel.x * v.c + vel.y * v.s;
+      const vl = -vel.x * v.s + vel.y * v.c;
+      if (Math.hypot(vf, vl) > 0.03) {
+        const ex = sx - vl * v.scale;
+        const ey = sy - vf * v.scale;
+        ctx.beginPath();
+        ctx.moveTo(sx, sy);
+        ctx.lineTo(ex, ey);
+        ctx.strokeStyle = color + "cc";
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      }
+
+      const label = "#" + track.id + (track.identity && track.identity.tagged_safe ? " TAG" : "");
+      ctx.font = "600 10px ui-monospace, monospace";
+      const width = ctx.measureText(label).width;
+      ctx.fillStyle = "rgba(8,16,22,0.75)";
+      ctx.fillRect(sx + 9, sy - 16, width + 8, 14);
+      ctx.fillStyle = color;
+      ctx.fillText(label, sx + 13, sy - 6);
+    }
+
+    // Red marker bearing: dashed ray and a red dot around the device heading.
+    const marker = state.marker;
+    if (marker && marker.detected) {
+      const bearing = (marker.bearing_deg || 0) * Math.PI / 180;
+      const radius = Math.min(v.center - 16, 88);
+      const mx = v.center - Math.sin(bearing) * radius;
+      const my = v.center - Math.cos(bearing) * radius;
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(v.center, v.center);
+      ctx.lineTo(mx, my);
+      ctx.strokeStyle = "rgba(255,107,107,0.45)";
+      ctx.setLineDash([4, 4]);
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      ctx.arc(mx, my, 5, 0, Math.PI * 2);
+      ctx.fillStyle = "#ff6b6b";
+      ctx.fill();
+      ctx.strokeStyle = "#081016";
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // Device marker: origin of the local frame, forward is up.
+    ctx.save();
+    ctx.translate(v.center, v.center);
+    ctx.beginPath();
+    ctx.moveTo(0, -11);
+    ctx.lineTo(7, 8);
+    ctx.lineTo(0, 4);
+    ctx.lineTo(-7, 8);
+    ctx.closePath();
+    ctx.fillStyle = "#e8f4ff";
+    ctx.fill();
+    ctx.strokeStyle = "#081016";
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function draw() {
+    setScreenTransform();
+    ctx.clearRect(0, 0, cssSize, cssSize);
+    const v = view();
+    drawRings(v);
+    drawWorld(v);
+    drawRoomLabels(v);
+    drawTracks(v);
+    dirty = false;
+  }
+
+  function text(id, value) {
+    const el = document.getElementById(id);
+    if (el && el.textContent !== String(value)) el.textContent = String(value);
+  }
+
+  function updatePanel() {
+    if (!state) return;
+    const env = state.environment_confidence || 0;
+    text("env", (env * 100).toFixed(0) + "%");
+    document.getElementById("envbar").style.width = Math.max(0, Math.min(100, env * 100)) + "%";
+    text("occupied", (state.occupancy && state.occupancy.occupied) || 0);
+    text("zones", (state.presence_zones || []).length);
+    text("pose", state.pose.x.toFixed(2) + ", " + state.pose.y.toFixed(2) + " m");
+    text("yaw", state.pose.yaw_deg.toFixed(1) + " deg");
+    text("timestamp", state.timestamp + " ms");
+    text("objects", (state.map || []).length);
+    text("walls", (state.walls || []).length);
+    text("rooms", (state.rooms || []).length);
+    text("sensorMode", state.sensor_mode || "--");
+    text("announcement", state.announcement || "--");
+
+    const health = state.sensor_health || {};
+    const names = ["imu", "radar", "uwb", "novelda", "ultrasonic"];
+    const chips = names.map((name) => {
+      const ok = health[name] === true;
+      return '<span class="chip ' + (ok ? "ok" : "") + '">' + name + (ok ? " ok" : " --") + "</span>";
+    });
+    const healthEl = document.getElementById("health");
+    const markup = chips.join("");
+    if (healthEl.dataset.markup !== markup) {
+      healthEl.innerHTML = markup;
+      healthEl.dataset.markup = markup;
+    }
+
+    const marker = state.marker || {};
+    const wrist = state.wrist || {};
+    text("marker", marker.detected ? "locked" : "none");
+    text("mbearing", marker.detected ? (marker.bearing_deg || 0).toFixed(1) + " deg" : "--");
+    text("mconfidence", marker.detected ? Math.round((marker.confidence || 0) * 100) + "%" : "--");
+    const wristEl = document.getElementById("wrist");
+    if (wristEl) {
+      const label = !wrist.enabled ? "disabled"
+        : wrist.vibrating ? "VIBRATING"
+        : wrist.aimed ? "aimed" : "idle";
+      if (wristEl.textContent !== label) wristEl.textContent = label;
+      wristEl.className = "v" + (wrist.vibrating ? " buzz" : wrist.aimed ? " aim" : "");
+    }
+
+    const tracks = state.tracks || [];
+    text("trackcount", "(" + tracks.length + ")");
+    const tracksEl = document.getElementById("tracks");
+    if (!tracks.length) {
+      if (tracksEl.dataset.markup !== "empty") {
+        tracksEl.innerHTML = '<div class="empty">no tracks</div>';
+        tracksEl.dataset.markup = "empty";
+      }
+    } else {
+      const html = tracks.map((t) => {
+        const cls = t.classification || "UNKNOWN_PERSON";
+        const colorClass = cls === "SAFE_TAGGED" ? "safe" : cls === "PRESENCE_ONLY" ? "presence" : "unknown";
+        const p = t.position;
+        const tag = t.identity && t.identity.tagged_safe
+          ? '<span class="tag">TAG ' + t.identity.tag_id + " / " + Math.round((t.identity.confidence || 0) * 100) + "%</span>"
+          : '<span class="tag">' + (t.visible ? "visible" : "occluded") + "</span>";
+        return '<div class="track"><div class="head"><span class="' + colorClass + '">#' + t.id +
+          " " + cls + "</span>" + tag + "</div>" +
+          '<div class="row"><span class="k">pos</span><span class="v">' + p.x.toFixed(2) + ", " + p.y.toFixed(2) +
+          "</span></div>" +
+          '<div class="row"><span class="k">sigma / existence</span><span class="v">' +
+          (t.position_sigma_m || 0).toFixed(2) + " m / " + Math.round((t.existence_confidence || 0) * 100) +
+          "%</span></div></div>";
+      }).join("");
+      if (tracksEl.dataset.markup !== html) {
+        tracksEl.innerHTML = html;
+        tracksEl.dataset.markup = html;
+      }
+    }
+
+    const link = document.getElementById("link");
+    link.classList.add("online");
+    document.getElementById("clock").textContent = new Date().toLocaleTimeString();
+  }
+
+  async function pollState() {
+    try {
+      const response = await fetch(stateUrl, { cache: "no-store" });
+      if (!response.ok) throw new Error("state " + response.status);
+      state = await response.json();
+      updatePanel();
+      dirty = true;
+    } catch (error) {
+      document.getElementById("link").classList.remove("online");
+      document.getElementById("clock").textContent = "telemetry offline";
+    }
+  }
+
+  async function pollGrid() {
+    try {
+      const response = await fetch(gridUrl, { cache: "no-store" });
+      if (!response.ok) return;
+      grid = await response.json();
+      gridImage = buildGridImage(grid);
+      dirty = true;
+    } catch (error) {
+      /* grid is optional until the first radar frame */
+    }
+  }
+
+  function loop() {
+    if (dirty) draw();
+    requestAnimationFrame(loop);
+  }
+
+  const mapText = document.getElementById("mapText");
+  const mapStatus = document.getElementById("mapStatus");
+  const mapFile = document.getElementById("mapFile");
+
+  mapFile.addEventListener("change", async () => {
+    const file = mapFile.files && mapFile.files[0];
+    if (!file) return;
+    if (file.size > 512 * 1024) {
+      mapStatus.textContent = "file too large (512 KiB max)";
+      return;
+    }
+    try {
+      mapText.value = await file.text();
+      mapStatus.textContent = "loaded " + file.name + "; press Load schematic";
+    } catch (error) {
+      mapStatus.textContent = "could not read file";
+    }
+  });
+
+  document.getElementById("mapSend").addEventListener("click", async () => {
+    const body = mapText.value.trim();
+    if (!body) {
+      mapStatus.textContent = "nothing to upload";
+      return;
+    }
+    mapStatus.textContent = "uploading...";
+    try {
+      const response = await fetch("/api/map", {
+        method: "POST",
+        headers: { "Content-Type": "text/plain" },
+        body
+      });
+      const reply = await response.text();
+      mapStatus.textContent = response.ok ? reply.trim() : "rejected: " + reply.trim();
+    } catch (error) {
+      mapStatus.textContent = "upload failed: " + error.message;
+    }
+  });
+
+  window.addEventListener("resize", resize);
+  window.addEventListener("orientationchange", resize);
+  resize();
+  loop();
+  pollState();
+  pollGrid();
+  setInterval(pollState, 250);
+  setInterval(pollGrid, 500);
+})();
+</script>
+</body>
+</html>
