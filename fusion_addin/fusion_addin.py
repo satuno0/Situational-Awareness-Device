@@ -1,5 +1,6 @@
 import os
 import re
+import subprocess
 import traceback
 
 import adsk.core
@@ -10,9 +11,12 @@ COMMAND_ID = "saExportActiveSketchesToDxf"
 COMMAND_NAME = "Export Sketches to DXF"
 WORKSPACE_ID = "FusionSolidEnvironment"
 PANEL_ID = "SolidScriptsAddinsPanel"
-OUTPUT_DIRECTORY = (
-    r"C:\Users\A1234\OneDrive\Documentos\Default Project\schematics"
-)
+PROJECT_DIRECTORY = r"C:\Users\A1234\OneDrive\Documentos\Default Project"
+OUTPUT_DIRECTORY = os.path.join(PROJECT_DIRECTORY, "schematics")
+GIT_EXECUTABLE = r"C:\Program Files\Git\cmd\git.exe"
+GIT_TIMEOUT_SECONDS = 45
+GIT_COMMIT_MESSAGE = "Update schematic exports from Fusion 360"
+GIT_COAUTHOR_TRAILER = "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
 
 _app = None
 _ui = None
@@ -49,6 +53,62 @@ def _unique_dxf_path(component_name, sketch_name, used_names):
     return os.path.join(OUTPUT_DIRECTORY, filename)
 
 
+def _run_git(arguments):
+    if not os.path.isfile(GIT_EXECUTABLE):
+        raise RuntimeError("Git was not found at {}".format(GIT_EXECUTABLE))
+
+    environment = os.environ.copy()
+    environment["GIT_TERMINAL_PROMPT"] = "0"
+    environment["GCM_INTERACTIVE"] = "Never"
+    try:
+        result = subprocess.run(
+            [GIT_EXECUTABLE] + arguments,
+            cwd=PROJECT_DIRECTORY,
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            universal_newlines=True,
+            timeout=GIT_TIMEOUT_SECONDS,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(
+            "Git {} timed out after {} seconds; interactive login prompts are disabled.".format(
+                arguments[0], GIT_TIMEOUT_SECONDS
+            )
+        )
+    except OSError as error:
+        raise RuntimeError("Could not start Git: {}".format(error))
+
+    output = (result.stdout or "").strip()
+    if result.returncode != 0:
+        detail = output[-2000:] if output else "no Git output"
+        raise RuntimeError(
+            "Git {} failed with exit code {}: {}".format(
+                arguments[0], result.returncode, detail
+            )
+        )
+    return output
+
+
+def _sync_schematics():
+    _run_git(["add", "schematics/"])
+    staged = _run_git(["status", "--porcelain", "--", "schematics/"])
+    if not staged:
+        return "Git sync: no schematic changes to commit."
+
+    _run_git([
+        "commit",
+        "-m", GIT_COMMIT_MESSAGE,
+        "-m", GIT_COAUTHOR_TRAILER,
+        "--only",
+        "--", "schematics/",
+    ])
+    _run_git(["push"])
+    return "Git sync: schematic changes committed and pushed."
+
+
 class ExportSketchesCommandExecuteHandler(adsk.core.CommandEventHandler):
     def notify(self, args):
         try:
@@ -61,6 +121,7 @@ class ExportSketchesCommandExecuteHandler(adsk.core.CommandEventHandler):
             used_names = set()
             exported = 0
             failures = []
+            sync_message = ""
 
             for component in design.allComponents:
                 for sketch in component.sketches:
@@ -81,9 +142,17 @@ class ExportSketchesCommandExecuteHandler(adsk.core.CommandEventHandler):
                 _ui.messageBox("No sketches were found in the active design.")
                 return
 
+            if exported:
+                try:
+                    sync_message = _sync_schematics()
+                except Exception as error:
+                    sync_message = "Git sync failed: {}".format(error)
+
             message = "Exported {} sketch(es) to:\n{}".format(
                 exported, OUTPUT_DIRECTORY
             )
+            if sync_message:
+                message += "\n\n" + sync_message
             if failures:
                 message += "\n\nFailed to export {} sketch(es):\n{}".format(
                     len(failures), "\n".join(failures)
