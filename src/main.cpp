@@ -3,6 +3,7 @@
 #include "fusion_engine.hpp"
 #include "haptics.hpp"
 #include "imu_driver.hpp"
+#include "lidar_driver.hpp"
 #include "marker_detector.hpp"
 #include "marker_driver.hpp"
 #include "novelda_driver.hpp"
@@ -13,8 +14,10 @@
 #include "sensor_mode.hpp"
 #include "simulation.hpp"
 #include "telemetry.hpp"
+#include "tof_driver.hpp"
 #include "ultrasonic_driver.hpp"
 #include "uwb_driver.hpp"
+#include "wallpad_driver.hpp"
 #include "wrist_haptics.hpp"
 
 #include <algorithm>
@@ -58,14 +61,20 @@ struct Options
 
     bool telemetry = true;
     std::string bind_address = "127.0.0.1";
-    uint16_t telemetry_port = 8080;
+    uint16_t telemetry_port = 8765;
     std::string web_root = "web";
 
     bool haptics = true;
     std::string haptic_device;
+    std::string haptic_i2c_device;
+    uint8_t haptic_i2c_address = 0x5A;
 
     bool wrist = true;
     std::string wrist_device;
+    std::string wrist_module_port;
+    int wrist_module_baud = 115200;
+    float wrist_yaw_offset_deg = 0.0f;
+    bool wrist_sweep = false;
     std::string marker_port;
     float marker_offset_deg = 0.0f;
     float marker_engage_deg = 8.0f;
@@ -86,12 +95,17 @@ struct Options
     double loop_rate_hz = 20.0;
     uint32_t seed = 0x5A17u;
 
-    std::string radar_data_port;
-    std::string radar_cli_port;
+    std::string radar_front_data_port = "/dev/ttyUSB0";
+    std::string radar_front_cfg_port = "/dev/ttyUSB1";
+    std::string radar_rear_data_port = "/dev/ttyUSB2";
+    std::string radar_rear_cfg_port = "/dev/ttyUSB3";
     std::string radar_config_file;
+    LidarConfig lidar;
+    TofConfig tof;
     std::string imu_device = "/dev/i2c-1";
     std::string uwb_port;
     std::string novelda_port;
+    std::string wallpad_port;
     std::string ultrasonic_port;
 };
 
@@ -116,24 +130,30 @@ void printUsage(const char* program)
         << "                         telemetry); otherwise it runs as fast as possible\n"
         << "  --rate <hz>            Hardware poll/process rate (default 20)\n\n"
         << "Telemetry:\n"
-        << "  --port <port>          HTTP port, 0 picks an ephemeral port (default 8080)\n"
-        << "  --bind <address>       Bind address (default 127.0.0.1; use 0.0.0.0 for phone)\n"
+        << "  --port <port>          HTTP port, 0 picks an ephemeral port (default 8765)\n"
+        << "  --bind <address>       Bind address (only 127.0.0.1 is allowed)\n"
         << "  --web-root <dir>       Directory containing index.html (default web)\n"
         << "  --no-telemetry         Disable the HTTP server\n\n"
         << "Haptics:\n"
         << "  --no-haptics           Disable the haptic worker\n"
-        << "  --haptic-device <path> Write motor state to this device/file\n"
+        << "  --haptic-device <path> PWM fallback output (writes 1/0)\n"
+        << "  --haptic-i2c <dev>     DRV2605L I2C device (non-blocking worker output)\n"
+        << "  --haptic-addr <value>  DRV2605L 7-bit I2C address (default 0x5A)\n"
         << "  --verbose              Log haptic events and progress\n\n"
         << "Red marker / wrist guidance:\n"
         << "  --no-wrist             Disable wrist guidance\n"
         << "  --wrist-device <path>  Write wrist motor state (1/0) to this device/file\n"
+        << "  --wrist-module <dev>   Wrist IMU/LRA BLE-UART bridge (WRIST and HAPTIC lines)\n"
+        << "  --wrist-baud <rate>    Wrist bridge baud rate (default 115200)\n"
+        << "  --wrist-offset <deg>   Additional startup wrist yaw zero offset\n"
+        << "  --wrist-sweep          Sweep wrist yaw/pitch in deterministic simulation\n"
         << "  --marker <dev>         Camera-bridge serial port (MARK/RED lines)\n"
         << "  --marker-offset <deg>  Camera yaw offset relative to device forward\n"
         << "  --marker-engage <deg>  Aim cone that starts vibration (default 8)\n"
         << "  --marker-release <deg> Aim cone that stops vibration (default 14)\n"
         << "  --no-marker-sim        Do not inject the synthetic marker in simulation\n\n"
         << "Perception / audio / map:\n"
-        << "  --sensors <mode>       mixed, radar, uwb, novelda, ultrasonic, vision,\n"
+        << "  --sensors <mode>       mixed, radar, lidar, tof, uwb, novelda, wallpad, ultrasonic, vision,\n"
         << "                         imu, or a comma list such as radar,uwb\n"
         << "  --announce             Speak track summaries through an earpiece/speaker\n"
         << "  --announce-device <p>  Line-oriented speaker bridge (SAY <text> lines)\n"
@@ -141,12 +161,28 @@ void printUsage(const char* program)
         << "  --announce-repeat <s>    Repeat unchanged summaries (default 8)\n"
         << "  --map <file>           Load a text floor plan / schematic as a prior\n\n"
         << "Hardware ports:\n"
-        << "  --radar-data <dev>     IWR6843 data port\n"
-        << "  --radar-cli <dev>      IWR6843 CLI port (for .cfg upload)\n"
-        << "  --radar-cfg <file>     mmWave .cfg file\n"
+        << "  --radar-front-data <dev> Front IWR6843 data port (default /dev/ttyUSB0)\n"
+        << "  --radar-front-cfg <dev>  Front IWR6843 config port (default /dev/ttyUSB1)\n"
+        << "  --radar-rear-data <dev>  Rear IWR6843 data port (default /dev/ttyUSB2)\n"
+        << "  --radar-rear-cfg <dev>   Rear IWR6843 config port (default /dev/ttyUSB3)\n"
+        << "  --radar-cfg <file>       mmWave .cfg file sent to each radar\n"
+        << "  --lidar <dev>          LD19 UART or ASCII bridge (LIDAR,x_m,y_m[,z_m])\n"
+        << "  --lidar-baud <rate>    LiDAR UART baud rate (default 230400 for LD19)\n"
+        << "  --lidar-gpio <spec>    LD19 gate GPIO: chip:line:high|low (default /dev/gpiochip3:12:high)\n"
+        << "  --tof-i2c <dev>        Dual VL53L8CX I2C bus (default /dev/i2c-1)\n"
+        << "  --tof-left-gpio <spec> Left LPn/XSHUT GPIO (default /dev/gpiochip3:10:high)\n"
+        << "  --tof-right-gpio <spec> Right LPn/XSHUT GPIO (default /dev/gpiochip3:11:high)\n"
+        << "  --tof-left-yaw <deg>   Left sensor yaw, positive toward left (default 30)\n"
+        << "  --tof-right-yaw <deg>  Right sensor yaw, positive toward left (default -30)\n"
+        << "  --tof-left-pitch <deg> Left sensor pitch, positive up (default 0)\n"
+        << "  --tof-right-pitch <deg> Right sensor pitch, positive up (default 0)\n"
+        << "  --tof-left-addr <hex>  Left ST-encoded I2C address (default 0x54)\n"
+        << "  --tof-right-addr <hex> Right ST-encoded I2C address (default 0x52)\n"
+        << "  --no-tof               Disable both VL53L8CX sensors\n"
         << "  --imu <dev>            ICM-42688 I2C device (default /dev/i2c-1)\n"
         << "  --uwb <dev>            DWM3000 bridge serial port\n"
         << "  --novelda <dev>        XeThru bridge serial port\n"
+        << "  --wallpad <dev>        LibreVNA sweep-adapter USB serial port\n"
         << "  --ultrasonic <dev>     MaxBotix serial port\n\n"
         << "  --help                 Show this help\n";
 }
@@ -212,6 +248,32 @@ bool parseFiniteFloat(const std::string& text, float& out)
     return true;
 }
 
+bool parseGpioLineSpec(const std::string& text, GpioLineConfig& config, std::string& error)
+{
+    const std::size_t polarity_separator = text.rfind(':');
+    const std::size_t line_separator =
+        polarity_separator == std::string::npos ? std::string::npos : text.rfind(':', polarity_separator - 1);
+    if (line_separator == std::string::npos || polarity_separator == std::string::npos)
+    {
+        error = "GPIO spec must be chip:line:high|low";
+        return false;
+    }
+    const std::string chip = text.substr(0, line_separator);
+    const std::string line = text.substr(line_separator + 1, polarity_separator - line_separator - 1);
+    const std::string polarity = text.substr(polarity_separator + 1);
+    uint32_t offset = 0;
+    if (chip.empty() || !parseUInt(line, offset) ||
+        (polarity != "high" && polarity != "low"))
+    {
+        error = "invalid GPIO spec (expected chip:line:high|low): " + text;
+        return false;
+    }
+    config.chip = chip;
+    config.offset = offset;
+    config.active_high = polarity == "high";
+    return true;
+}
+
 bool parseOptions(int argc, char** argv, Options& options, std::string& error)
 {
     for (int i = 1; i < argc; ++i)
@@ -228,8 +290,10 @@ bool parseOptions(int argc, char** argv, Options& options, std::string& error)
         if (arg == "--no-telemetry") { options.telemetry = false; continue; }
         if (arg == "--haptics") { options.haptics = true; continue; }
         if (arg == "--no-haptics") { options.haptics = false; continue; }
+        if (arg == "--no-tof") { options.tof.enabled = false; continue; }
         if (arg == "--wrist") { options.wrist = true; continue; }
         if (arg == "--no-wrist") { options.wrist = false; continue; }
+        if (arg == "--wrist-sweep") { options.wrist_sweep = true; continue; }
         if (arg == "--no-marker-sim") { options.simulate_marker = false; continue; }
         if (arg == "--announce") { options.announce = true; continue; }
         if (arg == "--no-announce") { options.announce = false; continue; }
@@ -310,6 +374,11 @@ bool parseOptions(int argc, char** argv, Options& options, std::string& error)
         if (matches(arg, "--bind"))
         {
             if (!takeValue(arg, i, argc, argv, "--bind", options.bind_address, error)) return false;
+            if (options.bind_address != "127.0.0.1")
+            {
+                error = "telemetry may bind only to 127.0.0.1";
+                return false;
+            }
             continue;
         }
         if (matches(arg, "--web-root"))
@@ -322,9 +391,60 @@ bool parseOptions(int argc, char** argv, Options& options, std::string& error)
             if (!takeValue(arg, i, argc, argv, "--haptic-device", options.haptic_device, error)) return false;
             continue;
         }
+        if (matches(arg, "--haptic-i2c"))
+        {
+            if (!takeValue(arg, i, argc, argv, "--haptic-i2c", options.haptic_i2c_device, error)) return false;
+            continue;
+        }
+        if (matches(arg, "--haptic-addr"))
+        {
+            std::string value;
+            if (!takeValue(arg, i, argc, argv, "--haptic-addr", value, error)) return false;
+            uint32_t address = 0;
+            if (!parseUInt(value, address) || address < 0x03u || address > 0x77u)
+            {
+                error = "invalid --haptic-addr (expected 7-bit address 0x03..0x77): " + value;
+                return false;
+            }
+            options.haptic_i2c_address = static_cast<uint8_t>(address);
+            continue;
+        }
         if (matches(arg, "--wrist-device"))
         {
             if (!takeValue(arg, i, argc, argv, "--wrist-device", options.wrist_device, error)) return false;
+            continue;
+        }
+        if (matches(arg, "--wrist-module"))
+        {
+            if (!takeValue(arg, i, argc, argv, "--wrist-module", options.wrist_module_port, error)) return false;
+            continue;
+        }
+        if (matches(arg, "--wrist-baud"))
+        {
+            std::string value;
+            if (!takeValue(arg, i, argc, argv, "--wrist-baud", value, error)) return false;
+            uint32_t baud = 0;
+            if (!parseUInt(value, baud) ||
+                (baud != 9600u && baud != 19200u && baud != 38400u && baud != 57600u &&
+                 baud != 115200u && baud != 230400u && baud != 460800u && baud != 921600u))
+            {
+                error = "unsupported --wrist-baud (choose 9600, 19200, 38400, 57600, 115200, 230400, 460800, or 921600): " +
+                        value;
+                return false;
+            }
+            options.wrist_module_baud = static_cast<int>(baud);
+            continue;
+        }
+        if (matches(arg, "--wrist-offset"))
+        {
+            std::string value;
+            if (!takeValue(arg, i, argc, argv, "--wrist-offset", value, error)) return false;
+            if (!parseFiniteFloat(value, options.wrist_yaw_offset_deg) ||
+                options.wrist_yaw_offset_deg < -180.0f || options.wrist_yaw_offset_deg > 180.0f)
+            {
+                error = "invalid --wrist-offset (expected -180..180): " + value;
+                return false;
+            }
             continue;
         }
         if (matches(arg, "--sensors"))
@@ -409,17 +529,158 @@ bool parseOptions(int argc, char** argv, Options& options, std::string& error)
         }
         if (matches(arg, "--radar-data"))
         {
-            if (!takeValue(arg, i, argc, argv, "--radar-data", options.radar_data_port, error)) return false;
+            if (!takeValue(arg, i, argc, argv, "--radar-data", options.radar_front_data_port, error)) return false;
             continue;
         }
         if (matches(arg, "--radar-cli"))
         {
-            if (!takeValue(arg, i, argc, argv, "--radar-cli", options.radar_cli_port, error)) return false;
+            if (!takeValue(arg, i, argc, argv, "--radar-cli", options.radar_front_cfg_port, error)) return false;
+            continue;
+        }
+        if (matches(arg, "--radar-front-data"))
+        {
+            if (!takeValue(arg, i, argc, argv, "--radar-front-data", options.radar_front_data_port, error)) return false;
+            continue;
+        }
+        if (matches(arg, "--radar-front-cfg"))
+        {
+            if (!takeValue(arg, i, argc, argv, "--radar-front-cfg", options.radar_front_cfg_port, error)) return false;
+            continue;
+        }
+        if (matches(arg, "--radar-rear-data"))
+        {
+            if (!takeValue(arg, i, argc, argv, "--radar-rear-data", options.radar_rear_data_port, error)) return false;
+            continue;
+        }
+        if (matches(arg, "--radar-rear-cfg"))
+        {
+            if (!takeValue(arg, i, argc, argv, "--radar-rear-cfg", options.radar_rear_cfg_port, error)) return false;
             continue;
         }
         if (matches(arg, "--radar-cfg"))
         {
             if (!takeValue(arg, i, argc, argv, "--radar-cfg", options.radar_config_file, error)) return false;
+            continue;
+        }
+        if (matches(arg, "--lidar"))
+        {
+            if (!takeValue(arg, i, argc, argv, "--lidar", options.lidar.port, error)) return false;
+            continue;
+        }
+        if (matches(arg, "--lidar-baud"))
+        {
+            std::string value;
+            if (!takeValue(arg, i, argc, argv, "--lidar-baud", value, error)) return false;
+            uint32_t baud = 0;
+            if (!parseUInt(value, baud) || baud == 0 || baud > 1000000u)
+            {
+                error = "invalid --lidar-baud: " + value;
+                return false;
+            }
+            options.lidar.baud_rate = static_cast<int>(baud);
+            continue;
+        }
+        if (matches(arg, "--lidar-gpio"))
+        {
+            std::string value;
+            if (!takeValue(arg, i, argc, argv, "--lidar-gpio", value, error) ||
+                !parseGpioLineSpec(value, options.lidar.motor_enable, error))
+                return false;
+            continue;
+        }
+        if (matches(arg, "--tof-i2c"))
+        {
+            if (!takeValue(arg, i, argc, argv, "--tof-i2c", options.tof.i2c_device, error)) return false;
+            continue;
+        }
+        if (matches(arg, "--tof-left-gpio"))
+        {
+            std::string value;
+            if (!takeValue(arg, i, argc, argv, "--tof-left-gpio", value, error) ||
+                !parseGpioLineSpec(value, options.tof.left.xshut, error))
+                return false;
+            continue;
+        }
+        if (matches(arg, "--tof-right-gpio"))
+        {
+            std::string value;
+            if (!takeValue(arg, i, argc, argv, "--tof-right-gpio", value, error) ||
+                !parseGpioLineSpec(value, options.tof.right.xshut, error))
+                return false;
+            continue;
+        }
+        if (matches(arg, "--tof-left-yaw"))
+        {
+            std::string value;
+            if (!takeValue(arg, i, argc, argv, "--tof-left-yaw", value, error) ||
+                !parseFiniteFloat(value, options.tof.left.mount_yaw_deg) ||
+                options.tof.left.mount_yaw_deg < -180.0f || options.tof.left.mount_yaw_deg > 180.0f)
+            {
+                error = "invalid --tof-left-yaw (expected -180..180)";
+                return false;
+            }
+            continue;
+        }
+        if (matches(arg, "--tof-right-yaw"))
+        {
+            std::string value;
+            if (!takeValue(arg, i, argc, argv, "--tof-right-yaw", value, error) ||
+                !parseFiniteFloat(value, options.tof.right.mount_yaw_deg) ||
+                options.tof.right.mount_yaw_deg < -180.0f || options.tof.right.mount_yaw_deg > 180.0f)
+            {
+                error = "invalid --tof-right-yaw (expected -180..180)";
+                return false;
+            }
+            continue;
+        }
+        if (matches(arg, "--tof-left-pitch"))
+        {
+            std::string value;
+            if (!takeValue(arg, i, argc, argv, "--tof-left-pitch", value, error) ||
+                !parseFiniteFloat(value, options.tof.left.mount_pitch_deg) ||
+                options.tof.left.mount_pitch_deg < -90.0f || options.tof.left.mount_pitch_deg > 90.0f)
+            {
+                error = "invalid --tof-left-pitch (expected -90..90)";
+                return false;
+            }
+            continue;
+        }
+        if (matches(arg, "--tof-right-pitch"))
+        {
+            std::string value;
+            if (!takeValue(arg, i, argc, argv, "--tof-right-pitch", value, error) ||
+                !parseFiniteFloat(value, options.tof.right.mount_pitch_deg) ||
+                options.tof.right.mount_pitch_deg < -90.0f || options.tof.right.mount_pitch_deg > 90.0f)
+            {
+                error = "invalid --tof-right-pitch (expected -90..90)";
+                return false;
+            }
+            continue;
+        }
+        if (matches(arg, "--tof-left-addr"))
+        {
+            std::string value;
+            if (!takeValue(arg, i, argc, argv, "--tof-left-addr", value, error)) return false;
+            uint32_t address = 0;
+            if (!parseUInt(value, address) || address < 0x08u || address > 0xF6u || (address & 1u) != 0)
+            {
+                error = "invalid --tof-left-addr (expected an even ST-encoded address 0x08..0xF6)";
+                return false;
+            }
+            options.tof.left_i2c_address = static_cast<uint16_t>(address);
+            continue;
+        }
+        if (matches(arg, "--tof-right-addr"))
+        {
+            std::string value;
+            if (!takeValue(arg, i, argc, argv, "--tof-right-addr", value, error)) return false;
+            uint32_t address = 0;
+            if (!parseUInt(value, address) || address < 0x08u || address > 0xF6u || (address & 1u) != 0)
+            {
+                error = "invalid --tof-right-addr (expected an even ST-encoded address 0x08..0xF6)";
+                return false;
+            }
+            options.tof.right_i2c_address = static_cast<uint16_t>(address);
             continue;
         }
         if (matches(arg, "--imu"))
@@ -435,6 +696,11 @@ bool parseOptions(int argc, char** argv, Options& options, std::string& error)
         if (matches(arg, "--novelda"))
         {
             if (!takeValue(arg, i, argc, argv, "--novelda", options.novelda_port, error)) return false;
+            continue;
+        }
+        if (matches(arg, "--wallpad"))
+        {
+            if (!takeValue(arg, i, argc, argv, "--wallpad", options.wallpad_port, error)) return false;
             continue;
         }
         if (matches(arg, "--ultrasonic"))
@@ -455,6 +721,11 @@ bool parseOptions(int argc, char** argv, Options& options, std::string& error)
     if (options.desktop_demo && (options.simulate || options.replay))
     {
         error = "--desktop-demo cannot be combined with --simulate or --replay";
+        return false;
+    }
+    if (options.wrist_sweep && !options.simulate)
+    {
+        error = "--wrist-sweep requires --simulate";
         return false;
     }
     if (options.desktop_demo && options.record)
@@ -631,6 +902,8 @@ HapticConfig hapticConfig(const Options& options)
     config.enabled = options.haptics;
     config.verbose = options.verbose;
     config.device_path = options.haptic_device;
+    config.drv2605_i2c_device = options.haptic_i2c_device;
+    config.drv2605_i2c_address = options.haptic_i2c_address;
     return config;
 }
 
@@ -642,6 +915,9 @@ WristConfig wristConfig(const Options& options)
     config.camera_yaw_offset_deg = options.marker_offset_deg;
     config.engage_deg = options.marker_engage_deg;
     config.release_deg = options.marker_release_deg;
+    config.module_port = options.wrist_module_port;
+    config.module_baud_rate = options.wrist_module_baud;
+    config.wrist_yaw_offset_deg = options.wrist_yaw_offset_deg;
     config.verbose = options.verbose;
     return config;
 }
@@ -688,13 +964,15 @@ AnnounceConfig announceConfig(const Options& options)
 struct RuntimeContext
 {
     RuntimeContext(const WristConfig& wrist_config, const AnnounceConfig& announce_config)
-        : guidance(wrist_config), vibrator(wrist_config), announcer(announce_config)
+        : guidance(wrist_config), vibrator(wrist_config), wrist_haptics(wrist_config),
+          announcer(announce_config)
     {
     }
 
     MarkerRuntime markers;
     WristGuidance guidance;
     WristVibrator vibrator;
+    WristHaptics wrist_haptics;
     Announcer announcer;
     Schematic schematic;
     std::string schematic_text;
@@ -724,16 +1002,23 @@ bool startHaptics(Haptics& haptics)
     return true;
 }
 
-bool startWrist(WristVibrator& vibrator, const Options& options)
+bool startWrist(RuntimeContext& runtime, const Options& options)
 {
     std::string error;
-    if (!vibrator.start(error))
+    if (!runtime.vibrator.start(error))
     {
         std::cerr << "[sa] wrist warning: " << error << "\n";
         return false;
     }
     if (options.wrist && !options.wrist_device.empty())
         std::cout << "[sa] wrist output -> " << options.wrist_device << "\n";
+    if (!runtime.wrist_haptics.start(error))
+    {
+        std::cerr << "[sa] wrist module warning: " << error << "\n";
+        return false;
+    }
+    if (options.wrist && !options.wrist_module_port.empty())
+        std::cout << "[sa] wrist IMU/LRA module -> " << options.wrist_module_port << "\n";
     return true;
 }
 
@@ -799,8 +1084,8 @@ int runDesktopDemo(const Options& options, RuntimeContext& runtime)
         {
             const int bearing_deg = static_cast<int>(std::lround(radToDeg(detection.bearing_rad)));
             std::string direction = "ahead";
-            if (bearing_deg > 0) direction = "to the left";
-            else if (bearing_deg < 0) direction = "to the right";
+            if (bearing_deg > 0) direction = "to the right";
+            else if (bearing_deg < 0) direction = "to the left";
             const std::string message = "Red marker detected " +
                 std::to_string(std::abs(bearing_deg)) + " degrees " + direction + ".";
             std::cout << "[desktop] " << message << "\n";
@@ -826,8 +1111,14 @@ int runDesktopDemo(const Options& options, RuntimeContext& runtime)
 }
 
 void publishAll(const WorldModel& world, const SensorFrame& frame, Telemetry& telemetry, Haptics& haptics,
-                bool telemetry_enabled, RuntimeContext& runtime)
+                bool telemetry_enabled, RuntimeContext& runtime,
+                bool scan_available = false, bool scan_active = false)
 {
+    haptics.update(world, frame.ultrasonic ? &*frame.ultrasonic : nullptr);
+    const auto collision_range = closeRangeCollisionRange(
+        world, frame.ultrasonic ? &*frame.ultrasonic : nullptr);
+    runtime.wrist_haptics.update(world, frame.wrist_orientation, frame.timestamp_ms,
+                                 collision_range.has_value());
     runtime.markers.observe(frame);
     const WristState wrist = runtime.guidance.update(runtime.markers.latest, frame.timestamp_ms);
     runtime.vibrator.update(frame.timestamp_ms, wrist.aimed);
@@ -836,9 +1127,8 @@ void publishAll(const WorldModel& world, const SensorFrame& frame, Telemetry& te
     {
         telemetry.publish(world, runtime.markers.latest,
                           wristTelemetry(wrist, runtime.vibrator, runtime.guidance.config()),
-                          runtime.announcer.lastText());
+                          runtime.announcer.lastText(), scan_available, scan_active);
     }
-    haptics.update(world, frame.ultrasonic ? &*frame.ultrasonic : nullptr);
 }
 
 // Parses and activates a schematic. `origin` is only used for logging.
@@ -920,6 +1210,7 @@ int runSimulation(const Options& options, Telemetry& telemetry, Haptics& haptics
     config.seed = options.seed;
     config.duration_s = options.duration_s > 0.0 ? options.duration_s : 60.0;
     config.marker_enabled = options.simulate_marker;
+    config.wrist_sweep = options.wrist_sweep;
     Simulation simulation(config);
 
     FusionEngine fusion;
@@ -1092,15 +1383,23 @@ struct HardwareRuntime
     // Drivers own serial/I2C handles and are intentionally non-copyable; keep
     // them behind unique_ptr so the runtime struct itself stays simple.
     std::unique_ptr<ImuDriver> imu;
-    std::unique_ptr<RadarDriver> radar;
+    std::unique_ptr<RadarDriver> radar_front;
+    std::unique_ptr<RadarDriver> radar_rear;
+    std::unique_ptr<LidarDriver> lidar;
+    std::unique_ptr<TofDriver> tof;
     std::unique_ptr<UwbDriver> uwb;
     std::unique_ptr<NoveldaDriver> novelda;
+    std::unique_ptr<WallpadDriver> wallpad;
     std::unique_ptr<UltrasonicDriver> ultrasonic;
     std::unique_ptr<MarkerDriver> marker;
     bool imu_ok = false;
-    bool radar_ok = false;
+    bool radar_front_ok = false;
+    bool radar_rear_ok = false;
+    bool lidar_ok = false;
+    bool tof_ok = false;
     bool uwb_ok = false;
     bool novelda_ok = false;
+    bool wallpad_ok = false;
     bool ultrasonic_ok = false;
     bool marker_ok = false;
 };
@@ -1116,16 +1415,40 @@ bool openHardware(const Options& options, HardwareRuntime& runtime)
     runtime.imu_ok = runtime.imu->open(error);
     if (!runtime.imu_ok) std::cerr << "[sa] IMU unavailable: " << error << "\n";
 
-    if (!options.radar_data_port.empty())
-    {
+    const auto openRadar = [&](const std::string& data_port,
+                               const std::string& cfg_port,
+                               float yaw_offset_deg,
+                               std::unique_ptr<RadarDriver>& driver,
+                               bool& healthy,
+                               const char* label) {
+        if (data_port.empty()) return;
         RadarConfig radar_config;
-        radar_config.data_port = options.radar_data_port;
-        radar_config.cli_port = options.radar_cli_port;
+        radar_config.data_port = data_port;
+        radar_config.cfg_port = cfg_port;
+        radar_config.yaw_offset_deg = yaw_offset_deg;
         radar_config.config_file = options.radar_config_file;
         radar_config.configure_on_open = !options.radar_config_file.empty();
-        runtime.radar = std::make_unique<RadarDriver>(radar_config);
-        runtime.radar_ok = runtime.radar->open(error);
-        if (!runtime.radar_ok) std::cerr << "[sa] radar unavailable: " << error << "\n";
+        driver = std::make_unique<RadarDriver>(radar_config);
+        healthy = driver->open(error);
+        if (!healthy) std::cerr << "[sa] " << label << " radar unavailable: " << error << "\n";
+    };
+    openRadar(options.radar_front_data_port, options.radar_front_cfg_port, 0.0f,
+              runtime.radar_front, runtime.radar_front_ok, "front");
+    openRadar(options.radar_rear_data_port, options.radar_rear_cfg_port, 180.0f,
+              runtime.radar_rear, runtime.radar_rear_ok, "rear");
+
+    if (!options.lidar.port.empty())
+    {
+        runtime.lidar = std::make_unique<LidarDriver>(options.lidar);
+        runtime.lidar_ok = runtime.lidar->open(error);
+        if (!runtime.lidar_ok) std::cerr << "[sa] LiDAR unavailable: " << error << "\n";
+    }
+
+    if (options.tof.enabled)
+    {
+        runtime.tof = std::make_unique<TofDriver>(options.tof);
+        runtime.tof_ok = runtime.tof->start(error);
+        if (!runtime.tof_ok) std::cerr << "[sa] ToF unavailable: " << error << "\n";
     }
 
     if (!options.uwb_port.empty())
@@ -1146,6 +1469,15 @@ bool openHardware(const Options& options, HardwareRuntime& runtime)
         if (!runtime.novelda_ok) std::cerr << "[sa] Novelda unavailable: " << error << "\n";
     }
 
+    if (!options.wallpad_port.empty())
+    {
+        WallpadConfig wallpad_config;
+        wallpad_config.port = options.wallpad_port;
+        runtime.wallpad = std::make_unique<WallpadDriver>(wallpad_config);
+        runtime.wallpad_ok = runtime.wallpad->open(error);
+        if (!runtime.wallpad_ok) std::cerr << "[sa] wall-pad unavailable: " << error << "\n";
+    }
+
     if (!options.ultrasonic_port.empty())
     {
         UltrasonicConfig ultrasonic_config;
@@ -1164,8 +1496,9 @@ bool openHardware(const Options& options, HardwareRuntime& runtime)
         if (!runtime.marker_ok) std::cerr << "[sa] marker bridge unavailable: " << error << "\n";
     }
 
-    return runtime.imu_ok || runtime.radar_ok || runtime.uwb_ok || runtime.novelda_ok || runtime.ultrasonic_ok ||
-           runtime.marker_ok;
+    return runtime.imu_ok || runtime.radar_front_ok || runtime.radar_rear_ok || runtime.lidar_ok ||
+           runtime.tof_ok || runtime.uwb_ok || runtime.novelda_ok || runtime.ultrasonic_ok ||
+           runtime.wallpad_ok || runtime.marker_ok;
 }
 
 int runHardware(const Options& options, Telemetry& telemetry, Haptics& haptics, bool telemetry_ok,
@@ -1192,13 +1525,18 @@ int runHardware(const Options& options, Telemetry& telemetry, Haptics& haptics, 
     uint32_t frame_id = 0;
     WorldModel last_world{};
     std::string error;
+    std::string last_tof_error;
 
     std::cout << "[sa] hardware mode @" << options.loop_rate_hz << " Hz"
               << " sensors=" << sensorSelectionName(options.sensors)
               << " (IMU=" << (hardware.imu_ok ? "yes" : "no")
-              << " radar=" << (hardware.radar_ok ? "yes" : "no")
+              << " radar-front=" << (hardware.radar_front_ok ? "yes" : "no")
+              << " radar-rear=" << (hardware.radar_rear_ok ? "yes" : "no")
+              << " lidar=" << (hardware.lidar_ok ? "yes" : "no")
+              << " tof=" << (hardware.tof_ok ? "yes" : "no")
               << " UWB=" << (hardware.uwb_ok ? "yes" : "no")
               << " novelda=" << (hardware.novelda_ok ? "yes" : "no")
+              << " wallpad=" << (hardware.wallpad_ok ? "yes" : "no")
               << " ultrasonic=" << (hardware.ultrasonic_ok ? "yes" : "no")
               << " marker=" << (hardware.marker_ok ? "yes" : "no") << ")\n";
 
@@ -1206,6 +1544,15 @@ int runHardware(const Options& options, Telemetry& telemetry, Haptics& haptics, 
     {
         next_tick += period;
         const uint64_t now_ms = monoNowMs();
+
+        if (telemetry_ok && telemetry.takeScanBurstCommand())
+        {
+            std::string scan_error;
+            if (hardware.lidar && hardware.lidar->triggerScanBurst(now_ms, kDefaultLidarBurstDurationSec, scan_error))
+                std::cout << "[sa] 360-degree LiDAR burst started\n";
+            else if (!scan_error.empty())
+                std::cerr << "[sa] LiDAR scan request rejected: " << scan_error << "\n";
+        }
 
         SensorFrame frame;
         frame.frame_id = ++frame_id;
@@ -1221,25 +1568,67 @@ int runHardware(const Options& options, Telemetry& telemetry, Haptics& haptics, 
             }
         }
 
-        if (hardware.radar_ok)
-        {
+        RadarFrame merged_radar;
+        bool has_radar = false;
+        const auto collectLatestRadarFrame = [&](const std::unique_ptr<RadarDriver>& radar, bool healthy) {
+            if (!healthy || !radar) return;
             RadarFrame candidate;
             RadarFrame newest;
-            bool has_radar = false;
-            while (hardware.radar->poll(candidate))
+            bool has_latest = false;
+            while (radar->poll(candidate))
             {
                 newest = std::move(candidate);
-                has_radar = true;
+                has_latest = true;
             }
-            if (has_radar)
+            if (!has_latest) return;
+            merged_radar.detections.insert(merged_radar.detections.end(),
+                                           newest.detections.begin(), newest.detections.end());
+            has_radar = true;
+        };
+        collectLatestRadarFrame(hardware.radar_front, hardware.radar_front_ok);
+        collectLatestRadarFrame(hardware.radar_rear, hardware.radar_rear_ok);
+        if (has_radar)
+        {
+            merged_radar.timestamp_ms = now_ms;
+            frame.radar = std::move(merged_radar);
+        }
+
+        if (hardware.lidar_ok)
+        {
+            LidarScan scan;
+            std::string lidar_error;
+            if (hardware.lidar->poll(now_ms, scan, lidar_error))
             {
-                newest.timestamp_ms = now_ms;
-                frame.radar = std::move(newest);
+                frame.lidar = std::move(scan);
+            }
+            else if (!lidar_error.empty())
+            {
+                std::cerr << "[sa] LiDAR input error: " << lidar_error << "\n";
+            }
+        }
+
+        if (hardware.tof_ok && hardware.tof)
+        {
+            TofScan scan;
+            std::string tof_error;
+            if (hardware.tof->poll(scan, tof_error))
+                frame.tof = std::move(scan);
+            else if (!tof_error.empty() && tof_error != last_tof_error)
+            {
+                std::cerr << "[sa] ToF input error: " << tof_error << "\n";
+                last_tof_error = tof_error;
             }
         }
 
         if (hardware.uwb_ok) hardware.uwb->poll(frame.uwb);
         if (hardware.novelda_ok) hardware.novelda->poll(frame.novelda);
+        if (hardware.wallpad_ok)
+        {
+            std::string wallpad_error;
+            if (!hardware.wallpad->poll(frame.wallpad_zones, wallpad_error) &&
+                !wallpad_error.empty())
+                std::cerr << "[sa] wall-pad input error: " << wallpad_error << "\n";
+        }
         if (hardware.ultrasonic_ok)
         {
             std::vector<UltrasonicMeasurement> samples;
@@ -1257,6 +1646,15 @@ int runHardware(const Options& options, Telemetry& telemetry, Haptics& haptics, 
                 observation.timestamp_ms = now_ms;
                 frame.marker = observation;
             }
+        }
+        if (options.wrist && !options.wrist_module_port.empty())
+        {
+            WristOrientation orientation;
+            std::string wrist_error;
+            if (runtime.wrist_haptics.poll(now_ms, orientation, wrist_error))
+                frame.wrist_orientation = orientation;
+            if (!wrist_error.empty())
+                std::cerr << "[sa] wrist orientation input error: " << wrist_error << "\n";
         }
 
         if (applyMapUpload(telemetry, telemetry_ok, fusion, runtime))
@@ -1330,7 +1728,7 @@ int main(int argc, char** argv)
 
     const WristConfig wrist_config = wristConfig(options);
     RuntimeContext runtime(wrist_config, announceConfig(options));
-    if (!options.desktop_demo) startWrist(runtime.vibrator, options);
+    if (!options.desktop_demo) startWrist(runtime, options);
     const bool announcer_ok = startAnnouncer(runtime.announcer, options);
 
     int result = 0;

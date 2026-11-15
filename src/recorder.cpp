@@ -10,7 +10,6 @@ namespace sa {
 namespace {
 
 constexpr char kMagic[8] = {'S', 'A', 'D', 'A', 'S', 'E', 'S', 'S'};
-constexpr uint32_t kVersion = 1;
 constexpr uint32_t kHeaderSize = 64;
 constexpr uint32_t kEndianMarker = 0x01020304u;
 
@@ -48,7 +47,7 @@ bool Recorder::open(const std::string& path, std::string& error)
     const uint64_t created = wallClockMs();
     BinaryWriter header;
     header.bytes(kMagic, sizeof(kMagic));
-    header.u32(kVersion);
+    header.u32(kSessionFormatVersion);
     header.u32(kHeaderSize);
     header.u32(kEndianMarker);
     header.u64(created);
@@ -65,7 +64,7 @@ bool Recorder::open(const std::string& path, std::string& error)
     BinaryWriter metadata;
     metadata.u64(created);
     metadata.string("sa_daemon");
-    metadata.string("1");
+    metadata.string(std::to_string(kSessionFormatVersion));
     writeRecord(RecordType::Metadata, metadata.data());
     return error_.empty();
 }
@@ -124,6 +123,34 @@ bool Recorder::writeRadarRecord(const RadarFrame& frame, uint32_t frame_id)
     return writeRecord(RecordType::Radar, writer.data());
 }
 
+bool Recorder::writeLidarRecord(const LidarScan& scan, uint32_t frame_id)
+{
+    if (scan.points.size() > kMaxLidarPointsPerScan)
+    {
+        error_ = "LiDAR scan exceeds the point limit";
+        return false;
+    }
+    BinaryWriter writer;
+    writer.u32(frame_id);
+    writer.u64(scan.timestamp_ms);
+    writeLidarScan(writer, scan);
+    return writeRecord(RecordType::Lidar, writer.data());
+}
+
+bool Recorder::writeTofRecord(const TofScan& scan, uint32_t frame_id)
+{
+    if (scan.rays.size() > kMaxTofRaysPerScan)
+    {
+        error_ = "ToF scan exceeds the ray limit";
+        return false;
+    }
+    BinaryWriter writer;
+    writer.u32(frame_id);
+    writer.u64(scan.timestamp_ms);
+    writeTofScan(writer, scan);
+    return writeRecord(RecordType::Tof, writer.data());
+}
+
 bool Recorder::writeUwbRecord(const UwbMeasurement& sample, uint32_t frame_id)
 {
     BinaryWriter writer;
@@ -140,6 +167,25 @@ bool Recorder::writeNoveldaRecord(const NoveldaMeasurement& sample, uint32_t fra
     writer.u64(sample.timestamp_ms);
     writeNovelda(writer, sample);
     return writeRecord(RecordType::Novelda, writer.data());
+}
+
+bool Recorder::writeWallpadRecord(const PresenceZone& zone, uint32_t frame_id, uint64_t timestamp_ms)
+{
+    BinaryWriter writer;
+    writer.u32(frame_id);
+    writer.u64(timestamp_ms);
+    writeZone(writer, zone);
+    return writeRecord(RecordType::Wallpad, writer.data());
+}
+
+bool Recorder::writeWristOrientationRecord(const WristOrientation& orientation, uint32_t frame_id)
+{
+    BinaryWriter writer;
+    writer.u32(frame_id);
+    writer.u64(orientation.timestamp_ms);
+    writer.f32(orientation.wrist_yaw_deg);
+    writer.f32(orientation.wrist_pitch_deg);
+    return writeRecord(RecordType::WristOrientation, writer.data());
 }
 
 bool Recorder::writeUltrasonicRecord(const UltrasonicMeasurement& sample, uint32_t frame_id)
@@ -202,15 +248,36 @@ bool Recorder::recordFrame(const SensorFrame& frame, const WorldModel* processed
         error_ = "recorder is not open";
         return false;
     }
+    if (frame.lidar && frame.lidar->points.size() > kMaxLidarPointsPerScan)
+    {
+        error_ = "LiDAR scan exceeds the point limit";
+        return false;
+    }
+    if (frame.tof && frame.tof->rays.size() > kMaxTofRaysPerScan)
+    {
+        error_ = "ToF scan exceeds the ray limit";
+        return false;
+    }
+    if (frame.wallpad_zones.size() > kMaxWallpadZonesPerFrame)
+    {
+        error_ = "wall-pad frame exceeds the sector limit";
+        return false;
+    }
 
     if (frame.imu && !writeImuRecord(*frame.imu, frame.frame_id)) return false;
     if (frame.radar && !writeRadarRecord(*frame.radar, frame.frame_id)) return false;
+    if (frame.lidar && !writeLidarRecord(*frame.lidar, frame.frame_id)) return false;
+    if (frame.tof && !writeTofRecord(*frame.tof, frame.frame_id)) return false;
     for (const auto& sample : frame.uwb)
         if (!writeUwbRecord(sample, frame.frame_id)) return false;
     for (const auto& sample : frame.novelda)
         if (!writeNoveldaRecord(sample, frame.frame_id)) return false;
+    for (const auto& zone : frame.wallpad_zones)
+        if (!writeWallpadRecord(zone, frame.frame_id, frame.timestamp_ms)) return false;
     if (frame.ultrasonic && !writeUltrasonicRecord(*frame.ultrasonic, frame.frame_id)) return false;
     if (frame.marker && !writeMarkerRecord(*frame.marker, frame.frame_id)) return false;
+    if (frame.wrist_orientation &&
+        !writeWristOrientationRecord(*frame.wrist_orientation, frame.frame_id)) return false;
 
     uint32_t flags = 0;
     if (processed_world)

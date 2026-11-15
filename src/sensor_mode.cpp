@@ -14,6 +14,9 @@ constexpr uint32_t kUwb = static_cast<uint32_t>(SensorKind::Uwb);
 constexpr uint32_t kNovelda = static_cast<uint32_t>(SensorKind::Novelda);
 constexpr uint32_t kUltrasonic = static_cast<uint32_t>(SensorKind::Ultrasonic);
 constexpr uint32_t kMarker = static_cast<uint32_t>(SensorKind::Marker);
+constexpr uint32_t kLidar = static_cast<uint32_t>(SensorKind::Lidar);
+constexpr uint32_t kTof = static_cast<uint32_t>(SensorKind::Tof);
+constexpr uint32_t kWallpad = static_cast<uint32_t>(SensorKind::Wallpad);
 
 std::string lower(std::string text)
 {
@@ -60,10 +63,16 @@ bool preset(const std::string& name, uint32_t& mask)
         mask = kAllSensorMask;
     else if (name == "radar")
         mask = kImu | kRadar;
+    else if (name == "lidar")
+        mask = kImu | kLidar;
+    else if (name == "tof")
+        mask = kImu | kTof;
     else if (name == "uwb")
         mask = kImu | kUwb;
     else if (name == "novelda" || name == "xethru")
         mask = kImu | kNovelda;
+    else if (name == "wallpad")
+        mask = kImu | kWallpad;
     else if (name == "ultrasonic" || name == "sonar")
         mask = kImu | kUltrasonic;
     else if (name == "vision" || name == "marker" || name == "camera")
@@ -79,8 +88,11 @@ bool namedSensor(const std::string& name, uint32_t& bit)
 {
     if (name == "imu") bit = kImu;
     else if (name == "radar") bit = kRadar;
+    else if (name == "lidar") bit = kLidar;
+    else if (name == "tof") bit = kTof;
     else if (name == "uwb") bit = kUwb;
     else if (name == "novelda" || name == "xethru") bit = kNovelda;
+    else if (name == "wallpad") bit = kWallpad;
     else if (name == "ultrasonic" || name == "sonar") bit = kUltrasonic;
     else if (name == "marker" || name == "vision" || name == "camera" || name == "rgb") bit = kMarker;
     else return false;
@@ -117,7 +129,7 @@ bool parseSensorSelection(const std::string& text, SensorSelection& selection, s
         if (!namedSensor(part, bit))
         {
             error = "unknown sensor '" + part +
-                    "' (use mixed, radar, uwb, novelda, ultrasonic, vision, imu or a comma list)";
+                    "' (use mixed, radar, lidar, tof, uwb, novelda, wallpad, ultrasonic, vision, imu or a comma list)";
             return false;
         }
         mask |= bit;
@@ -135,8 +147,11 @@ std::string sensorSelectionName(const SensorSelection& selection)
 {
     if (selection.mask == kAllSensorMask) return "mixed";
     if (selection.mask == (kImu | kRadar)) return "radar";
+    if (selection.mask == (kImu | kLidar)) return "lidar";
+    if (selection.mask == (kImu | kTof)) return "tof";
     if (selection.mask == (kImu | kUwb)) return "uwb";
     if (selection.mask == (kImu | kNovelda)) return "novelda";
+    if (selection.mask == (kImu | kWallpad)) return "wallpad";
     if (selection.mask == (kImu | kUltrasonic)) return "ultrasonic";
     if (selection.mask == (kImu | kMarker)) return "vision";
     if (selection.mask == kImu) return "imu";
@@ -148,8 +163,11 @@ std::string sensorSelectionName(const SensorSelection& selection)
     };
     if (selection.has(SensorKind::Imu)) append("imu");
     if (selection.has(SensorKind::Radar)) append("radar");
+    if (selection.has(SensorKind::Lidar)) append("lidar");
+    if (selection.has(SensorKind::Tof)) append("tof");
     if (selection.has(SensorKind::Uwb)) append("uwb");
     if (selection.has(SensorKind::Novelda)) append("novelda");
+    if (selection.has(SensorKind::Wallpad)) append("wallpad");
     if (selection.has(SensorKind::Ultrasonic)) append("ultrasonic");
     if (selection.has(SensorKind::Marker)) append("marker");
     return name.empty() ? "none" : name;
@@ -160,8 +178,11 @@ SensorFrame filterSensorFrame(const SensorFrame& frame, const SensorSelection& s
     SensorFrame out = frame;
     if (!selection.has(SensorKind::Imu)) out.imu.reset();
     if (!selection.has(SensorKind::Radar)) out.radar.reset();
+    if (!selection.has(SensorKind::Lidar)) out.lidar.reset();
+    if (!selection.has(SensorKind::Tof)) out.tof.reset();
     if (!selection.has(SensorKind::Uwb)) out.uwb.clear();
     if (!selection.has(SensorKind::Novelda)) out.novelda.clear();
+    if (!selection.has(SensorKind::Wallpad)) out.wallpad_zones.clear();
     if (!selection.has(SensorKind::Ultrasonic)) out.ultrasonic.reset();
     if (!selection.has(SensorKind::Marker)) out.marker.reset();
     return out;

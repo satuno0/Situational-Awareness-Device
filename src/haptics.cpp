@@ -3,9 +3,18 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <iostream>
 #include <limits>
 #include <vector>
+
+#if defined(__linux__)
+#include <cerrno>
+#include <fcntl.h>
+#include <linux/i2c-dev.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
+#endif
 
 namespace sa {
 namespace {
@@ -58,6 +67,39 @@ const char* hapticPatternName(HapticPattern pattern)
     return "NONE";
 }
 
+std::optional<float> closeRangeCollisionRange(const WorldModel& world,
+                                              const UltrasonicMeasurement* ultrasonic)
+{
+    float closest = std::numeric_limits<float>::infinity();
+    if (ultrasonic && ultrasonic->valid)
+    {
+        closest = ultrasonic->range_m;
+    }
+    else
+    {
+        for (const auto& track : world.tracks)
+        {
+            const Vec3 body = poseInverseApply(world.pose, track.filter.position());
+            if (body.y <= 0.15f) continue;
+            const float distance = std::sqrt(body.x * body.x + body.y * body.y);
+            if (distance > 1.5f) continue;
+            const float angle = std::atan2(std::abs(body.x), std::max(0.01f, body.y));
+            if (angle <= degToRad(30.0f)) closest = std::min(closest, distance);
+        }
+        for (const auto& object : world.static_objects)
+        {
+            const Vec3 body = poseInverseApply(world.pose, object.position);
+            if (body.y <= 0.15f) continue;
+            const float distance = std::sqrt(body.x * body.x + body.y * body.y);
+            if (distance > 1.5f) continue;
+            const float angle = std::atan2(std::abs(body.x), std::max(0.01f, body.y));
+            if (angle <= degToRad(30.0f)) closest = std::min(closest, distance);
+        }
+    }
+    if (std::isfinite(closest) && closest <= 1.5f) return closest;
+    return std::nullopt;
+}
+
 Haptics::Haptics() : Haptics(HapticConfig{}) {}
 Haptics::Haptics(const HapticConfig& config) : config_(config) {}
 Haptics::~Haptics() { stop(); }
@@ -75,6 +117,48 @@ bool Haptics::start(std::string& error)
             return false;
         }
     }
+#if defined(__linux__)
+    if (!config_.drv2605_i2c_device.empty())
+    {
+        drv2605_fd_ = ::open(config_.drv2605_i2c_device.c_str(), O_RDWR | O_NONBLOCK | O_CLOEXEC);
+        if (drv2605_fd_ >= 0 &&
+            ioctl(drv2605_fd_, I2C_SLAVE, static_cast<unsigned long>(config_.drv2605_i2c_address)) == 0)
+        {
+            std::string output_error;
+            drv2605_active_ = writeDrv2605(0x1A, 0xB6, output_error) &&
+                              writeDrv2605(0x01, 0x05, output_error) &&
+                              writeDrv2605(0x02, 0x00, output_error);
+            if (!drv2605_active_)
+                std::cerr << "[haptics] DRV2605L setup failed: " << output_error << "\n";
+        }
+        else
+        {
+            const std::string output_error = std::strerror(errno);
+            std::cerr << "[haptics] DRV2605L unavailable: " << output_error << "\n";
+        }
+        if (!drv2605_active_)
+        {
+            if (drv2605_fd_ >= 0) ::close(drv2605_fd_);
+            drv2605_fd_ = -1;
+            if (!device_.is_open())
+            {
+                error = "DRV2605L setup failed and no PWM fallback is available";
+                return false;
+            }
+            std::cerr << "[haptics] falling back to the configured PWM output\n";
+        }
+    }
+#else
+    if (!config_.drv2605_i2c_device.empty())
+    {
+        if (!device_.is_open())
+        {
+            error = "DRV2605L I2C hardware is supported only on Linux and no PWM fallback is available";
+            return false;
+        }
+        std::cerr << "[haptics] DRV2605L unavailable; falling back to the configured PWM output\n";
+    }
+#endif
     stop_ = false;
     running_ = true;
     resetTracking();
@@ -84,16 +168,22 @@ bool Haptics::start(std::string& error)
 
 void Haptics::stop()
 {
-    if (!running_.load() && !worker_.joinable()) return;
+    if (running_.load() || worker_.joinable())
     {
-        std::lock_guard<std::mutex> lock(mutex_);
-        stop_ = true;
-        running_ = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stop_ = true;
+            running_ = false;
+        }
+        cv_.notify_all();
+        if (worker_.joinable()) worker_.join();
     }
-    cv_.notify_all();
-    if (worker_.joinable()) worker_.join();
-    setMotor(false);
     if (device_.is_open()) device_.close();
+#if defined(__linux__)
+    if (drv2605_fd_ >= 0) ::close(drv2605_fd_);
+#endif
+    drv2605_fd_ = -1;
+    drv2605_active_ = false;
 }
 
 void Haptics::resetTracking()
@@ -108,14 +198,51 @@ void Haptics::resetTracking()
     active_pattern_ = HapticPattern::NONE;
 }
 
-void Haptics::setMotor(bool on)
+bool Haptics::writeDrv2605(uint8_t reg, uint8_t value, std::string& error)
 {
+#if defined(__linux__)
+    if (drv2605_fd_ < 0)
+    {
+        error = "DRV2605L I2C device is not open";
+        return false;
+    }
+    const uint8_t data[2] = {reg, value};
+    const ssize_t written = ::write(drv2605_fd_, data, sizeof(data));
+    if (written != static_cast<ssize_t>(sizeof(data)))
+    {
+        error = "DRV2605L register write failed: " + std::string(std::strerror(errno));
+        return false;
+    }
+    return true;
+#else
+    (void)reg;
+    (void)value;
+    error = "DRV2605L I2C hardware is supported only on Linux";
+    return false;
+#endif
+}
+
+bool Haptics::setMotor(bool on)
+{
+    if (drv2605_active_)
+    {
+        std::string error;
+        if (writeDrv2605(0x02, on ? 96 : 0, error)) return true;
+        std::cerr << "[haptics] DRV2605L output failed: " << error << "\n";
+        drv2605_active_ = false;
+#if defined(__linux__)
+        if (drv2605_fd_ >= 0) ::close(drv2605_fd_);
+#endif
+        drv2605_fd_ = -1;
+    }
     if (device_.is_open())
     {
         device_.seekp(0);
         device_ << (on ? config_.active_value : config_.inactive_value);
         device_.flush();
+        return static_cast<bool>(device_);
     }
+    return config_.device_path.empty();
 }
 
 void Haptics::trigger(HapticPattern pattern)
@@ -259,7 +386,8 @@ void Haptics::workerLoop()
 
         if (desired_on != motor_on)
         {
-            setMotor(desired_on);
+            if (!setMotor(desired_on))
+                std::cerr << "[haptics] PWM output write failed\n";
             motor_on = desired_on;
             if (config_.verbose && desired_on)
                 std::clog << "[haptics] " << hapticPatternName(active) << " pulse\n";
@@ -275,40 +403,14 @@ void Haptics::workerLoop()
         if (stop_) break;
     }
 
-    setMotor(false);
+    if (!setMotor(false)) std::cerr << "[haptics] failed to stop haptic output\n";
 }
 
 void Haptics::update(const WorldModel& world, const UltrasonicMeasurement* ultrasonic)
 {
     if (!running_.load()) return;
 
-    float closest = std::numeric_limits<float>::infinity();
-
-    if (ultrasonic && ultrasonic->valid)
-    {
-        closest = std::min(closest, ultrasonic->range_m);
-    }
-    else
-    {
-        for (const auto& track : world.tracks)
-        {
-            const Vec3 body = poseInverseApply(world.pose, track.filter.position());
-            if (body.x <= 0.15f) continue;
-            const float distance = std::sqrt(body.x * body.x + body.y * body.y);
-            if (distance > 1.5f) continue;
-            const float angle = std::atan2(std::abs(body.y), std::max(0.01f, body.x));
-            if (angle <= degToRad(30.0f)) closest = std::min(closest, distance);
-        }
-        for (const auto& object : world.static_objects)
-        {
-            const Vec3 body = poseInverseApply(world.pose, object.position);
-            if (body.x <= 0.15f) continue;
-            const float distance = std::sqrt(body.x * body.x + body.y * body.y);
-            if (distance > 1.5f) continue;
-            const float angle = std::atan2(std::abs(body.y), std::max(0.01f, body.x));
-            if (angle <= degToRad(30.0f)) closest = std::min(closest, distance);
-        }
-    }
+    const std::optional<float> collision_range = closeRangeCollisionRange(world, ultrasonic);
 
     std::vector<HapticPattern> events;
     std::unordered_map<uint32_t, bool> current_visible;
@@ -342,8 +444,8 @@ void Haptics::update(const WorldModel& world, const UltrasonicMeasurement* ultra
 
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (std::isfinite(closest) && closest <= 1.5f)
-            collision_range_ = closest;
+        if (collision_range)
+            collision_range_ = *collision_range;
         else
             collision_range_.reset();
         presence_active_ = presence;

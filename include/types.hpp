@@ -5,6 +5,7 @@
 #include "occupancy_grid.hpp"
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -12,15 +13,17 @@
 
 namespace sa {
 
-constexpr int kGridWidth = 160;
-constexpr int kGridHeight = 160;
+constexpr int kGridWidth = 280;
+constexpr int kGridHeight = 280;
 constexpr float kGridCellSizeM = 0.25f;
-constexpr float kGridRangeM = 20.0f;
+constexpr float kGridRangeM = 35.0f;
 
 struct SensorHealth
 {
     bool imu;
     bool radar;
+    bool lidar;
+    bool tof;
     bool uwb;
     bool novelda;
     bool ultrasonic;
@@ -153,6 +156,31 @@ struct RadarFrame
     std::vector<Detection> detections;
 };
 
+constexpr std::size_t kMaxLidarPointsPerScan = 8192;
+constexpr std::size_t kMaxTofRaysPerScan = 128;
+constexpr std::size_t kMaxWallpadZonesPerFrame = 32;
+
+struct LidarScan
+{
+    uint64_t timestamp_ms = 0;
+    Vec3 origin{}; // LiDAR origin in the device frame.
+    std::vector<Vec3> points; // Surface endpoints in the device frame.
+    bool burst_active = false;
+    bool burst_complete = false;
+};
+
+struct SurfaceRay
+{
+    Vec3 origin{};
+    Vec3 endpoint{};
+};
+
+struct TofScan
+{
+    uint64_t timestamp_ms = 0;
+    std::vector<SurfaceRay> rays;
+};
+
 struct UwbMeasurement
 {
     uint64_t timestamp_ms = 0;
@@ -163,6 +191,9 @@ struct UwbMeasurement
     bool has_range_rate = false;
     float range_rate_mps = 0.0f;
     float confidence = 0.5f;
+    bool is_fixed_anchor = false;
+    float anchor_x_m = 0.0f;
+    float anchor_y_m = 0.0f;
 };
 
 struct NoveldaMeasurement
@@ -185,7 +216,7 @@ struct UltrasonicMeasurement
 };
 
 // Visual red-marker bearing. Bearing is measured relative to the camera axis,
-// positive toward the left. A red marker is a navigation cue only; it is never
+// positive toward the right. A red marker is a navigation cue only; it is never
 // used for person identification.
 struct MarkerObservation
 {
@@ -196,16 +227,27 @@ struct MarkerObservation
     bool valid = false;
 };
 
+struct WristOrientation
+{
+    uint64_t timestamp_ms = 0;
+    float wrist_yaw_deg = 0.0f;
+    float wrist_pitch_deg = 0.0f;
+};
+
 struct SensorFrame
 {
     uint32_t frame_id = 0;
     uint64_t timestamp_ms = 0;
     std::optional<ImuSample> imu;
     std::optional<RadarFrame> radar;
+    std::optional<LidarScan> lidar;
+    std::optional<TofScan> tof;
     std::vector<UwbMeasurement> uwb;
     std::vector<NoveldaMeasurement> novelda;
+    std::vector<PresenceZone> wallpad_zones;
     std::optional<UltrasonicMeasurement> ultrasonic;
     std::optional<MarkerObservation> marker;
+    std::optional<WristOrientation> wrist_orientation;
 };
 
 inline const char* trackStateName(TrackState state)

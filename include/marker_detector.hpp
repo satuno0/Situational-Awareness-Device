@@ -30,7 +30,7 @@ struct RedMarkerConfig
 struct MarkerDetection
 {
     bool valid = false;
-    float bearing_rad = 0.0f; // camera frame, positive = left
+    float bearing_rad = 0.0f; // camera frame, positive = right
     float confidence = 0.0f;
     float area_ratio = 0.0f;
     int pixel_count = 0;

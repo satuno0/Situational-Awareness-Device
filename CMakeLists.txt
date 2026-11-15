@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(sa_daemon LANGUAGES CXX)
+project(sa_daemon LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -7,13 +7,23 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(Threads REQUIRED)
 
+add_library(vl53l8cx_uld STATIC
+    third_party/st_vl53l8cx/vl53l8cx_api.c
+    third_party/st_vl53l8cx/vl53l8cx_platform.c
+)
+target_include_directories(vl53l8cx_uld SYSTEM PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/st_vl53l8cx
+)
+
 set(SA_CORE_SOURCES
     src/announcer.cpp
     src/desktop_camera.cpp
     src/fusion_engine.cpp
+    src/gpio_line.cpp
     src/haptics.cpp
     src/imu_driver.cpp
     src/kalman_track.cpp
+    src/lidar_driver.cpp
     src/marker_detector.cpp
     src/marker_driver.cpp
     src/novelda_driver.cpp
@@ -28,21 +38,24 @@ set(SA_CORE_SOURCES
     src/simulation.cpp
     src/slam_manager.cpp
     src/telemetry.cpp
+    src/tof_driver.cpp
     src/track_manager.cpp
     src/ultrasonic_driver.cpp
     src/uwb_driver.cpp
+    src/wallpad_driver.cpp
     src/wrist_haptics.cpp
 )
 
 add_library(sa_core STATIC ${SA_CORE_SOURCES})
 target_include_directories(sa_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(sa_core PUBLIC cxx_std_20)
-target_link_libraries(sa_core PUBLIC Threads::Threads)
+target_link_libraries(sa_core PUBLIC Threads::Threads vl53l8cx_uld)
 
 if(MSVC)
-    target_compile_options(sa_core PRIVATE /W4 /permissive-)
+    target_compile_options(sa_core PRIVATE /W4 /WX /permissive-)
 else()
-    target_compile_options(sa_core PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(sa_core PRIVATE -Wall -Wextra -Wpedantic -Werror -pthread)
+    target_link_options(sa_core PRIVATE -pthread)
 endif()
 
 if(WIN32)

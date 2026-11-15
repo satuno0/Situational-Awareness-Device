@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <utility>
 
 namespace sa {
 
@@ -15,15 +16,18 @@ void SlamManager::reset(const Pose2D& pose)
     velocity_ = {0.0f, 0.0f, 0.0f};
     accel_filtered_ = {0.0f, 0.0f, 0.0f};
     last_ahrs_yaw_rad_ = attitude_.yawRad();
-    last_radar_pose_ms_.reset();
     confidence_ = 0.35f;
     initialized_ = true;
+    burst_points_.clear();
+    burst_reference_valid_ = false;
 }
 
 void SlamManager::setPose(const Pose2D& pose)
 {
     pose_ = pose;
     velocity_ = {0.0f, 0.0f, 0.0f};
+    burst_points_.clear();
+    burst_reference_valid_ = false;
 }
 
 void SlamManager::update() {}
@@ -45,23 +49,12 @@ void SlamManager::update(const ImuSample& sample, float dt)
     last_ahrs_yaw_rad_ = yaw;
     pose_.yaw_deg = wrapDeg(pose_.yaw_deg + radToDeg(yaw_delta));
 
-    const bool radar_fresh = last_radar_pose_ms_.has_value() && sample.timestamp_ms >= *last_radar_pose_ms_ &&
-                             sample.timestamp_ms - *last_radar_pose_ms_ <= 400;
-
     if (attitude_.stationary())
     {
-        if (!radar_fresh)
-        {
-            velocity_ = {0.0f, 0.0f, 0.0f};
-            accel_filtered_ = {0.0f, 0.0f, 0.0f};
-        }
+        velocity_ = {0.0f, 0.0f, 0.0f};
+        accel_filtered_ = {0.0f, 0.0f, 0.0f};
         return;
     }
-
-    // When radar clutter gives an ego-velocity estimate, translation is
-    // integrated once in update(RadarFrame). Integrating here as well would
-    // double-count the same motion.
-    if (radar_fresh) return;
 
     Vec3 world_accel = quatRotate(attitude_.orientation(), sample.accel_mps2);
     world_accel.z -= kGravity;
@@ -92,176 +85,74 @@ float SlamManager::scorePose(const std::vector<Vec3>& points,
         const Vec3 world = poseApply(candidate, point);
         int cx = 0;
         int cy = 0;
-        if (!grid.worldToCell(world.x, world.y, cx, cy)) continue;
-        const float p = grid.probability(cx, cy);
-        sum += (p - 0.5f);
+        if (grid.worldToCell(world.x, world.y, cx, cy))
+            sum += grid.probability(cx, cy);
     }
-    return sum / static_cast<float>(points.size());
+    return sum;
 }
 
-bool SlamManager::estimateEgoVelocity(const RadarFrame& radar)
+void SlamManager::matchSurfacePoints(const std::vector<Vec3>& input_points,
+                                     const OccupancyGrid& grid,
+                                     float environment_confidence)
 {
-    struct Sample
-    {
-        float ux;
-        float uy;
-        float vr;
-    };
-
-    std::vector<Sample> samples;
-    samples.reserve(radar.detections.size());
-    for (const auto& detection : radar.detections)
-    {
-        const float range = norm(detection.position);
-        if (range < 0.35f || range > config_.scan_max_range_m) continue;
-        if (std::abs(detection.position.z) > 2.5f) continue;
-        const Vec3 unit = detection.position * (1.0f / range);
-        if (std::sqrt(unit.x * unit.x + unit.y * unit.y) < 0.25f) continue;
-        samples.push_back(Sample{unit.x, unit.y, dot(detection.velocity, unit)});
-    }
-    if (samples.size() < 8) return false;
-
-    auto solve_pair = [](const Sample& a, const Sample& b, float& vx, float& vy) {
-        const float det = a.ux * b.uy - a.uy * b.ux;
-        if (std::abs(det) < 0.15f) return false;
-        vx = (-a.vr * b.uy + b.vr * a.uy) / det;
-        vy = (-b.vr * a.ux + a.vr * b.ux) / det;
-        return std::isfinite(vx) && std::isfinite(vy);
-    };
-
-    auto fit = [](const std::vector<Sample>& input, float& vx, float& vy) {
-        double sxx = 0.0;
-        double sxy = 0.0;
-        double syy = 0.0;
-        double bx = 0.0;
-        double by = 0.0;
-        for (const auto& s : input)
-        {
-            sxx += static_cast<double>(s.ux) * s.ux;
-            sxy += static_cast<double>(s.ux) * s.uy;
-            syy += static_cast<double>(s.uy) * s.uy;
-            bx += static_cast<double>(s.ux) * (-s.vr);
-            by += static_cast<double>(s.uy) * (-s.vr);
-        }
-        sxx += 1.0e-3;
-        syy += 1.0e-3;
-        const double det = sxx * syy - sxy * sxy;
-        if (std::abs(det) < 1.0e-6) return false;
-        vx = static_cast<float>((bx * syy - by * sxy) / det);
-        vy = static_cast<float>((by * sxx - bx * sxy) / det);
-        return std::isfinite(vx) && std::isfinite(vy);
-    };
-
-    // Deterministic RANSAC over pairs of bearings. Static clutter is the
-    // majority, so the ego model with the most low-residual detections wins;
-    // moving people remain outliers instead of dragging the estimate.
-    float best_vx = 0.0f;
-    float best_vy = 0.0f;
-    std::size_t best_inliers = 0;
-    for (std::size_t i = 0; i < samples.size(); ++i)
-    {
-        for (std::size_t j = i + 1; j < samples.size(); ++j)
-        {
-            float vx = 0.0f;
-            float vy = 0.0f;
-            if (!solve_pair(samples[i], samples[j], vx, vy)) continue;
-            if (vx * vx + vy * vy > 4.0f) continue;
-            std::size_t inliers = 0;
-            for (const auto& s : samples)
-            {
-                if (std::abs(s.ux * vx + s.uy * vy + s.vr) <= 0.06f) ++inliers;
-            }
-            if (inliers > best_inliers)
-            {
-                best_inliers = inliers;
-                best_vx = vx;
-                best_vy = vy;
-            }
-        }
-    }
-
-    const std::size_t required = std::max<std::size_t>(8, (samples.size() * 3) / 5);
-    if (best_inliers < required) return false;
-
-    std::vector<Sample> inliers;
-    inliers.reserve(best_inliers);
-    for (const auto& s : samples)
-    {
-        if (std::abs(s.ux * best_vx + s.uy * best_vy + s.vr) <= 0.06f) inliers.push_back(s);
-    }
-
-    float vx = best_vx;
-    float vy = best_vy;
-    if (inliers.size() >= 8) fit(inliers, vx, vy);
-
-    Vec3 body{vx, vy, 0.0f};
-    const float speed = norm(body);
-    if (speed > 2.0f) body = body * (2.0f / speed);
-    velocity_ = bodyVectorToWorld(body);
-    return true;
-}
-
-void SlamManager::update(const RadarFrame& radar, const OccupancyGrid& grid)
-{
-    if (estimateEgoVelocity(radar))
-    {
-        float dt = 0.0f;
-        if (last_radar_pose_ms_ && radar.timestamp_ms >= *last_radar_pose_ms_)
-        {
-            dt = static_cast<float>(radar.timestamp_ms - *last_radar_pose_ms_) / 1000.0f;
-            dt = clampf(dt, 0.0f, 0.5f);
-        }
-        pose_.x += velocity_.x * dt;
-        pose_.y += velocity_.y * dt;
-        last_radar_pose_ms_ = radar.timestamp_ms;
-    }
-
-    if (!config_.enable_scan_matching) return;
-    // A stationary device has no translation to correct, and a self-built map
-    // would only let the matcher drift against itself.
-    if (norm(velocity_) < 0.04f) return;
-    if (grid.occupiedCellCount(0.62f) < 80) return;
+    if (!config_.enable_scan_matching || !(environment_confidence > 0.50f)) return;
 
     std::vector<Vec3> points;
-    points.reserve(std::min(config_.max_scan_points, radar.detections.size()));
-    for (const auto& detection : radar.detections)
+    points.reserve(std::min(config_.max_scan_points, input_points.size()));
+    for (const auto& point : input_points)
     {
-        if (points.size() >= config_.max_scan_points) break;
-        if (std::abs(detection.velocity.z) > config_.scan_doppler_gate_mps) continue;
-        const float speed = norm(detection.velocity);
-        if (speed > config_.scan_doppler_gate_mps) continue;
-        if (detection.range < 0.35f || detection.range > config_.scan_max_range_m) continue;
-        if (std::abs(detection.position.z) > 2.5f) continue;
-        points.push_back(detection.position);
+        if (!std::isfinite(point.x) || !std::isfinite(point.y) || !std::isfinite(point.z) ||
+            norm(point) < 0.15f || norm(point) > config_.scan_max_range_m ||
+            std::abs(point.z) > 2.5f)
+            continue;
+        points.push_back(point);
+    }
+    if (points.size() > config_.max_scan_points)
+    {
+        std::vector<Vec3> sampled;
+        sampled.reserve(config_.max_scan_points);
+        for (std::size_t i = 0; i < config_.max_scan_points; ++i)
+            sampled.push_back(points[i * points.size() / config_.max_scan_points]);
+        points = std::move(sampled);
     }
     if (points.size() < 8) return;
 
     const Pose2D base = pose_;
     const float base_score = scorePose(points, base, grid);
+    float best_rank = base_score;
     float best_score = base_score;
     Pose2D best = base;
 
-    const int yaw_steps = 5;
-    const int xy_steps = 3;
-    const float yaw_step_deg = config_.search_yaw_deg / static_cast<float>(yaw_steps);
-    const float xy_step = config_.search_translation_m / static_cast<float>(xy_steps);
+    constexpr float kTranslationStepM = 0.05f;
+    constexpr float kYawStepDeg = 1.0f;
+    const int translation_steps = std::max(
+        0, static_cast<int>(std::lround(clampf(config_.search_translation_m, 0.0f, 0.15f) /
+                                        kTranslationStepM)));
+    const int yaw_steps = std::max(
+        0, static_cast<int>(std::lround(clampf(config_.search_yaw_deg, 0.0f, 4.0f) /
+                                        kYawStepDeg)));
 
     for (int yi = -yaw_steps; yi <= yaw_steps; ++yi)
     {
-        for (int xi = -xy_steps; xi <= xy_steps; ++xi)
+        for (int xi = -translation_steps; xi <= translation_steps; ++xi)
         {
-            for (int yi2 = -xy_steps; yi2 <= xy_steps; ++yi2)
+            for (int yi2 = -translation_steps; yi2 <= translation_steps; ++yi2)
             {
                 Pose2D candidate = base;
-                candidate.x += static_cast<float>(xi) * xy_step;
-                candidate.y += static_cast<float>(yi2) * xy_step;
-                candidate.yaw_deg = wrapDeg(base.yaw_deg + static_cast<float>(yi) * yaw_step_deg);
-                float score = scorePose(points, candidate, grid);
-                // Preserve the short-term prior; do not snap to unrelated map
-                // structure when several poses fit equally well.
-                score -= 0.012f * static_cast<float>(xi * xi + yi2 * yi2) / 9.0f;
-                if (score > best_score)
+                const float dx = static_cast<float>(xi) * kTranslationStepM;
+                const float dy = static_cast<float>(yi2) * kTranslationStepM;
+                const float dyaw = static_cast<float>(yi) * kYawStepDeg;
+                candidate.x += dx;
+                candidate.y += dy;
+                candidate.yaw_deg = wrapDeg(base.yaw_deg + dyaw);
+                const float score = scorePose(points, candidate, grid);
+                const float prior_penalty =
+                    0.002f * static_cast<float>(points.size()) *
+                    (std::sqrt(dx * dx + dy * dy) / 0.15f + std::abs(dyaw) / 4.0f);
+                const float rank = score - prior_penalty;
+                if (rank > best_rank)
                 {
+                    best_rank = rank;
                     best_score = score;
                     best = candidate;
                 }
@@ -269,21 +160,92 @@ void SlamManager::update(const RadarFrame& radar, const OccupancyGrid& grid)
         }
     }
 
-    const float improvement = best_score - base_score;
-    if (improvement > 0.012f && best_score > 0.06f)
+    if (best_rank > base_score + 1.0e-4f)
     {
-        pose_.x = 0.75f * best.x + 0.25f * base.x;
-        pose_.y = 0.75f * best.y + 0.25f * base.y;
-        pose_.yaw_deg = wrapDeg(base.yaw_deg + 0.75f * wrapDeg(best.yaw_deg - base.yaw_deg));
-        attitude_.correctYaw(degToRad(pose_.yaw_deg), 0.20f);
+        pose_ = best;
+        attitude_.correctYaw(degToRad(pose_.yaw_deg), 0.25f);
         last_ahrs_yaw_rad_ = attitude_.yawRad();
-        const float quality = clampf(best_score * 4.5f, 0.0f, 1.0f);
-        confidence_ = clampf(0.78f * confidence_ + 0.22f * quality + 0.02f, 0.0f, 0.98f);
+        const float quality = clampf(best_score / static_cast<float>(points.size()), 0.0f, 1.0f);
+        confidence_ = clampf(0.75f * confidence_ + 0.25f * quality + 0.01f, 0.0f, 0.98f);
     }
     else
     {
         confidence_ = std::max(0.20f, confidence_ * 0.995f);
     }
+}
+
+bool SlamManager::update(const LidarScan& scan,
+                         const OccupancyGrid& grid,
+                         float environment_confidence)
+{
+    bool loop_closed = false;
+    if (scan.burst_active)
+    {
+        if (!burst_reference_valid_)
+        {
+            burst_reference_pose_ = pose_;
+            burst_reference_valid_ = true;
+        }
+        for (const Vec3& point : scan.points)
+        {
+            if (burst_points_.size() >= kMaxLidarPointsPerScan) break;
+            if (!std::isfinite(point.x) || !std::isfinite(point.y) || !std::isfinite(point.z) ||
+                norm(point - scan.origin) > config_.scan_max_range_m)
+                continue;
+            const Vec3 world = poseApply(pose_, point);
+            burst_points_.push_back(poseInverseApply(burst_reference_pose_, world));
+        }
+    }
+
+    matchSurfacePoints(scan.points, grid, environment_confidence);
+
+    if (scan.burst_complete)
+    {
+        const Pose2D end_pose = pose_;
+        if (burst_reference_valid_)
+        {
+            pose_ = burst_reference_pose_;
+            loop_closed = detectLoopClosure(burst_points_, grid, environment_confidence);
+            if (loop_closed)
+            {
+                const Vec3 end_offset =
+                    poseInverseApply(burst_reference_pose_, Vec3{end_pose.x, end_pose.y, 0.0f});
+                const Vec3 corrected_end = poseApply(pose_, end_offset);
+                pose_.x = corrected_end.x;
+                pose_.y = corrected_end.y;
+                pose_.yaw_deg = wrapDeg(pose_.yaw_deg +
+                                        wrapDeg(end_pose.yaw_deg - burst_reference_pose_.yaw_deg));
+                attitude_.correctYaw(degToRad(pose_.yaw_deg), 0.45f);
+                last_ahrs_yaw_rad_ = attitude_.yawRad();
+            }
+            else
+            {
+                pose_ = end_pose;
+            }
+        }
+        burst_points_.clear();
+        burst_reference_valid_ = false;
+    }
+    return loop_closed;
+}
+
+void SlamManager::update(const TofScan& scan,
+                         const OccupancyGrid& grid,
+                         float environment_confidence)
+{
+    std::vector<Vec3> points;
+    points.reserve(scan.rays.size());
+    for (const SurfaceRay& ray : scan.rays)
+    {
+        if (!std::isfinite(ray.origin.x) || !std::isfinite(ray.origin.y) ||
+            !std::isfinite(ray.origin.z) || !std::isfinite(ray.endpoint.x) ||
+            !std::isfinite(ray.endpoint.y) || !std::isfinite(ray.endpoint.z))
+            continue;
+        const float range = norm(ray.endpoint - ray.origin);
+        if (range <= 0.15f || range > config_.scan_max_range_m) continue;
+        points.push_back(ray.endpoint);
+    }
+    matchSurfacePoints(points, grid, environment_confidence);
 }
 
 void SlamManager::correctPose(const Pose2D& measurement, float confidence)
@@ -296,11 +258,123 @@ void SlamManager::correctPose(const Pose2D& measurement, float confidence)
     confidence_ = clampf(confidence_ + (1.0f - confidence_) * w * 0.35f, 0.0f, 0.99f);
 }
 
-bool SlamManager::detectLoopClosure() { return false; }
-bool SlamManager::detectLoopClosure(const std::vector<MapObject>& objects)
+void SlamManager::correctPose(const UwbMeasurement& anchor)
 {
-    (void)objects;
-    return false;
+    if (!anchor.is_fixed_anchor || !std::isfinite(anchor.range_m) || anchor.range_m <= 0.05f ||
+        !std::isfinite(anchor.anchor_x_m) || !std::isfinite(anchor.anchor_y_m) ||
+        !std::isfinite(anchor.confidence))
+        return;
+
+    const float dx = pose_.x - anchor.anchor_x_m;
+    const float dy = pose_.y - anchor.anchor_y_m;
+    const float estimated_range = std::sqrt(dx * dx + dy * dy);
+    if (!(estimated_range > 0.05f)) return;
+
+    const float weight = clampf(anchor.confidence, 0.0f, 1.0f) * 0.25f;
+    const float range_error = clampf(anchor.range_m - estimated_range, -1.0f, 1.0f);
+    pose_.x += (dx / estimated_range) * range_error * weight;
+    pose_.y += (dy / estimated_range) * range_error * weight;
+    confidence_ = clampf(confidence_ + 0.02f * weight, 0.0f, 0.99f);
+}
+
+float SlamManager::loopClosureScore(const std::vector<Vec3>& points,
+                                    const Pose2D& candidate,
+                                    const OccupancyGrid& grid) const
+{
+    if (points.empty()) return 0.0f;
+    std::size_t matches = 0;
+    for (const Vec3& point : points)
+    {
+        const Vec3 world = poseApply(candidate, point);
+        int cx = 0;
+        int cy = 0;
+        if (grid.worldToCell(world.x, world.y, cx, cy) &&
+            grid.probability(cx, cy) > 0.75f)
+            ++matches;
+    }
+    return static_cast<float>(matches) / static_cast<float>(points.size());
+}
+
+bool SlamManager::detectLoopClosure(const std::vector<Vec3>& input_points,
+                                    const OccupancyGrid& grid,
+                                    float environment_confidence)
+{
+    if (!config_.enable_scan_matching || !(environment_confidence > 0.50f)) return false;
+
+    std::vector<Vec3> points;
+    points.reserve(input_points.size());
+    for (const Vec3& point : input_points)
+    {
+        if (!std::isfinite(point.x) || !std::isfinite(point.y) || !std::isfinite(point.z) ||
+            norm(point) < 0.15f || norm(point) > config_.scan_max_range_m ||
+            std::abs(point.z) > 2.5f)
+            continue;
+        points.push_back(point);
+    }
+    constexpr std::size_t kMaxLoopPoints = 1024;
+    if (points.size() > kMaxLoopPoints)
+    {
+        std::vector<Vec3> sampled;
+        sampled.reserve(kMaxLoopPoints);
+        for (std::size_t i = 0; i < kMaxLoopPoints; ++i)
+            sampled.push_back(points[i * points.size() / kMaxLoopPoints]);
+        points = std::move(sampled);
+    }
+    if (points.size() < 12) return false;
+
+    const Pose2D prior = pose_;
+    Pose2D best = prior;
+    float best_score = loopClosureScore(points, prior, grid);
+    float best_rank = best_score;
+
+    const auto search = [&](const Pose2D& center,
+                            float translation_radius,
+                            float translation_step,
+                            float yaw_radius,
+                            float yaw_step) {
+        const int translation_steps = static_cast<int>(std::lround(translation_radius / translation_step));
+        const int yaw_steps = static_cast<int>(std::lround(yaw_radius / yaw_step));
+        for (int yi = -yaw_steps; yi <= yaw_steps; ++yi)
+        {
+            for (int xi = -translation_steps; xi <= translation_steps; ++xi)
+            {
+                for (int yi2 = -translation_steps; yi2 <= translation_steps; ++yi2)
+                {
+                    Pose2D candidate = center;
+                    const float dx = static_cast<float>(xi) * translation_step;
+                    const float dy = static_cast<float>(yi2) * translation_step;
+                    const float dyaw = static_cast<float>(yi) * yaw_step;
+                    candidate.x += dx;
+                    candidate.y += dy;
+                    candidate.yaw_deg = wrapDeg(center.yaw_deg + dyaw);
+                    const float score = loopClosureScore(points, candidate, grid);
+                    const float distance_from_prior =
+                        std::sqrt((candidate.x - prior.x) * (candidate.x - prior.x) +
+                                  (candidate.y - prior.y) * (candidate.y - prior.y));
+                    const float yaw_from_prior = std::abs(wrapDeg(candidate.yaw_deg - prior.yaw_deg));
+                    const float rank =
+                        score - 0.002f * (distance_from_prior / 1.5f + yaw_from_prior / 25.0f);
+                    if (rank > best_rank)
+                    {
+                        best = candidate;
+                        best_score = score;
+                        best_rank = rank;
+                    }
+                }
+            }
+        }
+    };
+
+    search(prior, 1.5f, 0.5f, 25.0f, 5.0f);
+    search(best, 0.5f, 0.1f, 5.0f, 1.0f);
+    search(best, 0.1f, 0.05f, 1.0f, 1.0f);
+    if (best_score < 0.35f) return false;
+
+    pose_ = best;
+    attitude_.correctYaw(degToRad(pose_.yaw_deg), 0.45f);
+    last_ahrs_yaw_rad_ = attitude_.yawRad();
+    confidence_ = clampf(std::max(confidence_, 0.65f + 0.30f * best_score), 0.0f, 0.99f);
+    return true;
 }
 
 Vec3 SlamManager::bodyToWorld(const Vec3& body) const { return poseApply(pose_, body); }

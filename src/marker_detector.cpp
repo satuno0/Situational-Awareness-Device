@@ -114,7 +114,7 @@ MarkerDetection RedMarkerDetector::detect(const RgbFrameView& frame) const
     const float centroid_x = best.sum_x * inv_count;
     const float focal = (static_cast<float>(frame.width) * 0.5f) /
                         std::tan(std::max(0.1f, config_.horizontal_fov_rad) * 0.5f);
-    detection.bearing_rad = std::atan2(-(centroid_x - static_cast<float>(frame.width) * 0.5f), focal);
+    detection.bearing_rad = std::atan2(centroid_x - static_cast<float>(frame.width) * 0.5f, focal);
 
     const float color_score = clampf((best.sum_redness * inv_count) / 0.60f, 0.0f, 1.0f);
     const float size_score = std::sqrt(clampf(

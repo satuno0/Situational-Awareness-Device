@@ -27,8 +27,8 @@ OccupancyGrid::OccupancyGrid() : OccupancyGrid(GridConfig{}) {}
 
 OccupancyGrid::OccupancyGrid(const GridConfig& config) : config_(config)
 {
-    if (config_.width <= 0) config_.width = 160;
-    if (config_.height <= 0) config_.height = 160;
+    if (config_.width <= 0) config_.width = 280;
+    if (config_.height <= 0) config_.height = 280;
     if (!(config_.cell_size > 0.0f)) config_.cell_size = 0.25f;
     reset();
 }
@@ -46,6 +46,7 @@ int OccupancyGrid::cellIndex(int cx, int cy) const
 
 bool OccupancyGrid::worldToCell(float x, float y, int& cx, int& cy) const
 {
+    // Columns follow +X (right); rows follow +Y (forward).
     cx = static_cast<int>(std::floor(x / config_.cell_size)) + config_.width / 2;
     cy = static_cast<int>(std::floor(y / config_.cell_size)) + config_.height / 2;
     return cx >= 0 && cy >= 0 && cx < config_.width && cy < config_.height;

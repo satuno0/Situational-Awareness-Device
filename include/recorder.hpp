@@ -21,7 +21,11 @@ enum class RecordType : uint32_t
     World = 7,
     FrameEnd = 8,
     Marker = 9,
-    Schematic = 10
+    Schematic = 10,
+    Lidar = 11,
+    Tof = 12,
+    Wallpad = 13,
+    WristOrientation = 14
 };
 
 struct RecorderConfig
@@ -64,8 +68,12 @@ private:
     bool writeRecord(RecordType type, const std::vector<uint8_t>& payload);
     bool writeImuRecord(const ImuSample& sample, uint32_t frame_id);
     bool writeRadarRecord(const RadarFrame& frame, uint32_t frame_id);
+    bool writeLidarRecord(const LidarScan& scan, uint32_t frame_id);
+    bool writeTofRecord(const TofScan& scan, uint32_t frame_id);
     bool writeUwbRecord(const UwbMeasurement& sample, uint32_t frame_id);
     bool writeNoveldaRecord(const NoveldaMeasurement& sample, uint32_t frame_id);
+    bool writeWallpadRecord(const PresenceZone& zone, uint32_t frame_id, uint64_t timestamp_ms);
+    bool writeWristOrientationRecord(const WristOrientation& orientation, uint32_t frame_id);
     bool writeUltrasonicRecord(const UltrasonicMeasurement& sample, uint32_t frame_id);
     bool writeMarkerRecord(const MarkerObservation& sample, uint32_t frame_id);
     bool writeTracksRecord(const WorldModel& world, uint32_t frame_id, uint64_t timestamp_ms);

@@ -1,13 +1,16 @@
 #include "telemetry.hpp"
 
 #include <algorithm>
+#include <cerrno>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iomanip>
+#include <iostream>
 #include <sstream>
 #include <vector>
 
@@ -16,6 +19,7 @@
 #include <ws2tcpip.h>
 #else
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <sys/select.h>
 #include <sys/socket.h>
@@ -136,6 +140,70 @@ void closeSocket(Socket socket)
 #endif
 }
 
+bool setNonBlocking(Socket socket)
+{
+#if defined(_WIN32)
+    u_long enabled = 1;
+    return ioctlsocket(socket, FIONBIO, &enabled) == 0;
+#else
+    const int flags = fcntl(socket, F_GETFL, 0);
+    return flags >= 0 && fcntl(socket, F_SETFL, flags | O_NONBLOCK) == 0;
+#endif
+}
+
+bool wouldBlockOrInterrupt()
+{
+#if defined(_WIN32)
+    const int error = WSAGetLastError();
+    return error == WSAEWOULDBLOCK || error == WSAEINTR;
+#else
+    return errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR;
+#endif
+}
+
+int waitForSocket(Socket socket, bool writable, std::chrono::steady_clock::time_point deadline)
+{
+    while (true)
+    {
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) return 0;
+        const auto remaining = std::chrono::duration_cast<std::chrono::microseconds>(deadline - now);
+        timeval timeout{};
+        timeout.tv_sec = static_cast<long>(remaining.count() / 1000000);
+        timeout.tv_usec = static_cast<long>(remaining.count() % 1000000);
+        fd_set read_set;
+        fd_set write_set;
+        FD_ZERO(&read_set);
+        FD_ZERO(&write_set);
+        if (writable) FD_SET(socket, &write_set);
+        else FD_SET(socket, &read_set);
+#if defined(_WIN32)
+        const int ready = select(0, writable ? nullptr : &read_set, writable ? &write_set : nullptr, nullptr, &timeout);
+#else
+        const int ready =
+            select(socket + 1, writable ? nullptr : &read_set, writable ? &write_set : nullptr, nullptr, &timeout);
+#endif
+        if (ready > 0) return 1;
+        if (ready == 0) return 0;
+        if (!wouldBlockOrInterrupt()) return -1;
+    }
+}
+
+int recvWithDeadline(Socket socket,
+                     char* buffer,
+                     int capacity,
+                     std::chrono::steady_clock::time_point deadline)
+{
+    while (true)
+    {
+        const int ready = waitForSocket(socket, false, deadline);
+        if (ready <= 0) return ready;
+        const int received = recv(socket, buffer, capacity, 0);
+        if (received >= 0) return received;
+        if (!wouldBlockOrInterrupt()) return -1;
+    }
+}
+
 } // namespace
 
 Telemetry::Telemetry() : Telemetry(TelemetryConfig{}) {}
@@ -166,6 +234,11 @@ bool Telemetry::start(std::string& error)
         error = "telemetry disabled";
         return false;
     }
+    if (config_.bind_address != "127.0.0.1")
+    {
+        error = "telemetry may bind only to 127.0.0.1";
+        return false;
+    }
     loadIndex(error);
 
 #if defined(_WIN32)
@@ -181,6 +254,15 @@ bool Telemetry::start(std::string& error)
     if (socket == kInvalidSocket)
     {
         error = "failed to create telemetry socket";
+#if defined(_WIN32)
+        WSACleanup();
+#endif
+        return false;
+    }
+    if (!setNonBlocking(socket))
+    {
+        error = "failed to make telemetry listener non-blocking";
+        closeSocket(socket);
 #if defined(_WIN32)
         WSACleanup();
 #endif
@@ -280,6 +362,12 @@ void Telemetry::serverLoop()
 #endif
         const Socket client = accept(listener, reinterpret_cast<sockaddr*>(&client_address), &client_length);
         if (client == kInvalidSocket) continue;
+        if (!setNonBlocking(client))
+        {
+            std::cerr << "[telemetry] failed to make accepted client non-blocking\n";
+            closeSocket(client);
+            continue;
+        }
         handleClient(static_cast<intptr_t>(client));
     }
 }
@@ -288,14 +376,17 @@ void Telemetry::sendAll(intptr_t raw_socket, const std::string& data) const
 {
     const Socket socket = static_cast<Socket>(raw_socket);
     std::size_t offset = 0;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
     while (offset < data.size())
     {
+        if (waitForSocket(socket, true, deadline) <= 0) return;
 #if defined(_WIN32)
         const int sent = send(socket, data.data() + offset, static_cast<int>(data.size() - offset), 0);
 #else
         const ssize_t sent = send(socket, data.data() + offset, data.size() - offset, MSG_NOSIGNAL);
 #endif
-        if (sent <= 0) break;
+        if (sent < 0 && wouldBlockOrInterrupt()) continue;
+        if (sent <= 0) return;
         offset += static_cast<std::size_t>(sent);
     }
 }
@@ -319,21 +410,13 @@ std::string Telemetry::response(const std::string& status,
 void Telemetry::handleClient(intptr_t raw_socket)
 {
     const Socket socket = static_cast<Socket>(raw_socket);
-#if defined(_WIN32)
-    DWORD timeout = 1500;
-    setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
-#else
-    timeval timeout{};
-    timeout.tv_sec = 1;
-    timeout.tv_usec = 500000;
-    setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-#endif
 
     std::string request;
     char buffer[2048];
+    const auto header_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
     while (request.find("\r\n\r\n") == std::string::npos && request.size() < 16384)
     {
-        const int got = recv(socket, buffer, sizeof(buffer), 0);
+        const int got = recvWithDeadline(socket, buffer, sizeof(buffer), header_deadline);
         if (got <= 0) break;
         request.append(buffer, static_cast<std::size_t>(got));
     }
@@ -354,6 +437,73 @@ void Telemetry::handleClient(intptr_t raw_socket)
     const std::size_t header_end = request.find("\r\n\r\n");
     if (method == "POST")
     {
+        if (path == "/api/command")
+        {
+            if (header_end == std::string::npos)
+            {
+                sendAll(raw_socket, response("400 Bad Request", "text/plain", "missing headers\n", false));
+                closeSocket(socket);
+                return;
+            }
+            std::size_t content_length = 0;
+            bool have_length = false;
+            std::size_t position = 0;
+            while (position < header_end)
+            {
+                const std::size_t end = request.find("\r\n", position);
+                if (end == std::string::npos || end > header_end) break;
+                const std::string header = request.substr(position, end - position);
+                const std::size_t colon = header.find(':');
+                if (colon != std::string::npos &&
+                    lowerCopy(trimCopy(header.substr(0, colon))) == "content-length")
+                {
+                    const std::string value = trimCopy(header.substr(colon + 1));
+                    char* parse_end = nullptr;
+                    const unsigned long parsed = std::strtoul(value.c_str(), &parse_end, 10);
+                    if (parse_end != value.c_str() && *parse_end == '\0')
+                    {
+                        content_length = static_cast<std::size_t>(parsed);
+                        have_length = true;
+                    }
+                }
+                position = end + 2;
+            }
+            if (!have_length || content_length == 0 || content_length > 64)
+            {
+                sendAll(raw_socket, response("400 Bad Request", "text/plain", "invalid command body\n", false));
+                closeSocket(socket);
+                return;
+            }
+            std::string body = request.substr(header_end + 4);
+            const auto body_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
+            while (body.size() < content_length)
+            {
+                const int got = recvWithDeadline(socket, buffer, sizeof(buffer), body_deadline);
+                if (got <= 0) break;
+                body.append(buffer, static_cast<std::size_t>(got));
+            }
+            if (body.size() < content_length)
+            {
+                sendAll(raw_socket, response("400 Bad Request", "text/plain", "truncated command body\n", false));
+                closeSocket(socket);
+                return;
+            }
+            body.resize(content_length);
+            if (trimCopy(body) != "CMD:SCAN_360")
+            {
+                sendAll(raw_socket, response("400 Bad Request", "text/plain", "unsupported command\n", false));
+                closeSocket(socket);
+                return;
+            }
+            {
+                std::lock_guard<std::mutex> lock(data_mutex_);
+                scan_burst_command_pending_ = true;
+            }
+            sendAll(raw_socket, response("202 Accepted", "text/plain", "360 scan request queued\n", false));
+            closeSocket(socket);
+            return;
+        }
+
         if (path != "/api/map")
         {
             const std::string reply =
@@ -403,9 +553,10 @@ void Telemetry::handleClient(intptr_t raw_socket)
         }
 
         std::string body = request.substr(header_end + 4);
+        const auto body_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
         while (body.size() < content_length)
         {
-            const int got = recv(socket, buffer, sizeof(buffer), 0);
+            const int got = recvWithDeadline(socket, buffer, sizeof(buffer), body_deadline);
             if (got <= 0) break;
             body.append(buffer, static_cast<std::size_t>(got));
         }
@@ -484,7 +635,9 @@ void Telemetry::handleClient(intptr_t raw_socket)
 void Telemetry::buildStateJson(const WorldModel& world,
                                const std::optional<MarkerObservation>& marker,
                                const WristTelemetry& wrist,
-                               const std::string& announcement)
+                               const std::string& announcement,
+                               bool scan_available,
+                               bool scan_active)
 {
     std::ostringstream out;
     out << "{";
@@ -496,10 +649,14 @@ void Telemetry::buildStateJson(const WorldModel& world,
     out << "\"sensor_health\":{"
         << "\"imu\":" << (world.health.imu ? "true" : "false")
         << ",\"radar\":" << (world.health.radar ? "true" : "false")
+        << ",\"lidar\":" << (world.health.lidar ? "true" : "false")
+        << ",\"tof\":" << (world.health.tof ? "true" : "false")
         << ",\"uwb\":" << (world.health.uwb ? "true" : "false")
         << ",\"novelda\":" << (world.health.novelda ? "true" : "false")
         << ",\"ultrasonic\":" << (world.health.ultrasonic ? "true" : "false")
         << ",\"score\":" << number(world.health.health_score) << "},";
+    out << "\"scan_burst\":{\"available\":" << (scan_available ? "true" : "false")
+        << ",\"active\":" << (scan_active ? "true" : "false") << "},";
     out << "\"occupancy\":{\"occupied\":" << world.occupancy.occupiedCellCount()
         << ",\"known\":" << world.occupancy.knownCellCount()
         << ",\"total\":" << world.occupancy.totalCellCount() << "},";
@@ -631,9 +788,11 @@ void Telemetry::buildGridJson(const WorldModel& world)
 void Telemetry::publish(const WorldModel& world,
                         const std::optional<MarkerObservation>& marker,
                         const WristTelemetry& wrist,
-                        const std::string& announcement)
+                        const std::string& announcement,
+                        bool scan_available,
+                        bool scan_active)
 {
-    buildStateJson(world, marker, wrist, announcement);
+    buildStateJson(world, marker, wrist, announcement, scan_available, scan_active);
     buildGridJson(world);
 }
 
@@ -644,6 +803,14 @@ bool Telemetry::takeMapUpload(std::string& text)
     text.swap(pending_map_text_);
     pending_map_text_.clear();
     has_map_upload_ = false;
+    return true;
+}
+
+bool Telemetry::takeScanBurstCommand()
+{
+    std::lock_guard<std::mutex> lock(data_mutex_);
+    if (!scan_burst_command_pending_) return false;
+    scan_burst_command_pending_ = false;
     return true;
 }
 

@@ -12,7 +12,7 @@ struct UwbConfig
 {
     // A small MCU/firmware bridge owns the DWM3000 SPI radio and emits one
     // ranging result per line:
-    //   tag_id,range_m,aoa_deg,confidence[,range_rate_mps]
+    //   tag_id,range_m,aoa_deg,confidence[,range_rate_mps[,is_fixed_anchor,anchor_x_m,anchor_y_m]]
     // Empty/nan AoA fields mean the optional AoA estimate is unavailable.
     std::string port;
     int baud_rate = 115200;

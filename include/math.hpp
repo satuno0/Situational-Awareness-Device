@@ -34,6 +34,8 @@ struct Pose2D
     float yaw_deg;
 };
 
+// Device and world coordinates are right-handed: +X right, +Y forward, +Z up.
+// Positive yaw rotates the forward axis toward the left.
 inline Vec3 makeVec3(float x = 0.0f, float y = 0.0f, float z = 0.0f)
 {
     return Vec3{x, y, z};

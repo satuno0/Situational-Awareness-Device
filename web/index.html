@@ -83,6 +83,14 @@
     border: 1px solid var(--line); border-radius: 8px; padding: 6px 9px; cursor: pointer;
   }
   .upload-row button:active { background: #1d3140; }
+  .scan-row { display: grid; gap: 7px; margin-top: 6px; }
+  .scan-row button {
+    font: 11px ui-monospace, monospace; color: var(--text); background: var(--panel-2);
+    border: 1px solid var(--line); border-radius: 8px; padding: 8px 9px; cursor: pointer;
+  }
+  .scan-row button:disabled { opacity: 0.45; cursor: not-allowed; }
+  .scan-status { font-size: 11px; color: var(--safe); }
+  .scan-status.active { color: var(--unknown); }
   @media (max-width: 760px) {
     main { grid-template-columns: 1fr; grid-template-rows: minmax(0, 1fr) auto; }
     aside { border-left: 0; border-top: 1px solid var(--line); max-height: 42dvh; grid-template-columns: 1fr 1fr; padding-bottom: calc(12px + env(safe-area-inset-bottom)); }
@@ -148,6 +156,14 @@
           <button id="mapSend">Load schematic</button>
         </div>
         <div class="empty" id="mapStatus">Text floor plans only. PDF/DXF/image files are not parsed.</div>
+      </section>
+
+      <section class="card">
+        <h2>Silent surface scan</h2>
+        <div class="scan-row">
+          <div class="scan-status" id="scanStatus">LIDAR UNAVAILABLE</div>
+          <button id="scanTrigger" disabled>360° Scan Burst (1.5s)</button>
+        </div>
       </section>
 
       <section class="card">
@@ -241,10 +257,10 @@
     const center = cssSize / 2;
     const c = Math.cos(yaw);
     const s = Math.sin(yaw);
-    const m11 = s * scale;
-    const m21 = -c * scale;
-    const m12 = -c * scale;
-    const m22 = -s * scale;
+    const m11 = c * scale;
+    const m21 = s * scale;
+    const m12 = s * scale;
+    const m22 = -c * scale;
     const dx = center - m11 * px - m21 * py;
     const dy = center - m12 * px - m22 * py;
     return { yaw, px, py, scale, center, m11, m12, m21, m22, dx, dy, c, s };
@@ -253,9 +269,9 @@
   function worldToScreen(v, x, y) {
     const wx = x - v.px;
     const wy = y - v.py;
-    const forward = wx * v.c + wy * v.s;
-    const left = -wx * v.s + wy * v.c;
-    return [v.center - left * v.scale, v.center - forward * v.scale];
+    const right = wx * v.c + wy * v.s;
+    const forward = -wx * v.s + wy * v.c;
+    return [v.center + right * v.scale, v.center - forward * v.scale];
   }
 
   function setScreenTransform() {
@@ -299,8 +315,8 @@
 
     if (state) {
       for (const zone of state.presence_zones || []) {
-        const a0 = v.yaw + zone.bearing_center_rad - zone.bearing_width_rad / 2;
-        const a1 = v.yaw + zone.bearing_center_rad + zone.bearing_width_rad / 2;
+        const a0 = Math.PI / 2 + v.yaw - zone.bearing_center_rad - zone.bearing_width_rad / 2;
+        const a1 = Math.PI / 2 + v.yaw - zone.bearing_center_rad + zone.bearing_width_rad / 2;
         ctx.beginPath();
         ctx.arc(v.px, v.py, zone.range_max, a0, a1);
         ctx.arc(v.px, v.py, zone.range_min, a1, a0, true);
@@ -422,7 +438,7 @@
     if (marker && marker.detected) {
       const bearing = (marker.bearing_deg || 0) * Math.PI / 180;
       const radius = Math.min(v.center - 16, 88);
-      const mx = v.center - Math.sin(bearing) * radius;
+      const mx = v.center + Math.sin(bearing) * radius;
       const my = v.center - Math.cos(bearing) * radius;
       ctx.save();
       ctx.beginPath();
@@ -493,7 +509,7 @@
     text("announcement", state.announcement || "--");
 
     const health = state.sensor_health || {};
-    const names = ["imu", "radar", "uwb", "novelda", "ultrasonic"];
+    const names = ["imu", "radar", "lidar", "tof", "uwb", "novelda", "ultrasonic"];
     const chips = names.map((name) => {
       const ok = health[name] === true;
       return '<span class="chip ' + (ok ? "ok" : "") + '">' + name + (ok ? " ok" : " --") + "</span>";
@@ -504,6 +520,15 @@
       healthEl.innerHTML = markup;
       healthEl.dataset.markup = markup;
     }
+
+    const scan = state.scan_burst || {};
+    const scanStatus = document.getElementById("scanStatus");
+    const scanButton = document.getElementById("scanTrigger");
+    const scanLabel = !scan.available ? "LIDAR UNAVAILABLE"
+      : scan.active ? "360° SCANNING..." : "SILENT PATROL (0 dBA)";
+    scanStatus.textContent = scanLabel;
+    scanStatus.className = "scan-status" + (scan.active ? " active" : "");
+    scanButton.disabled = !scan.available || scan.active;
 
     const marker = state.marker || {};
     const wrist = state.wrist || {};
@@ -620,6 +645,22 @@
       mapStatus.textContent = response.ok ? reply.trim() : "rejected: " + reply.trim();
     } catch (error) {
       mapStatus.textContent = "upload failed: " + error.message;
+    }
+  });
+
+  document.getElementById("scanTrigger").addEventListener("click", async () => {
+    const status = document.getElementById("scanStatus");
+    status.textContent = "REQUESTING SCAN...";
+    try {
+      const response = await fetch("/api/command", {
+        method: "POST",
+        headers: { "Content-Type": "text/plain" },
+        body: "CMD:SCAN_360"
+      });
+      const reply = await response.text();
+      if (!response.ok) status.textContent = "REJECTED: " + reply.trim();
+    } catch (error) {
+      status.textContent = "REQUEST FAILED: " + error.message;
     }
   });
 

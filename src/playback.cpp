@@ -8,7 +8,6 @@ namespace sa {
 namespace {
 
 constexpr char kMagic[8] = {'S', 'A', 'D', 'A', 'S', 'E', 'S', 'S'};
-constexpr uint32_t kVersion = 1;
 constexpr uint32_t kEndianMarker = 0x01020304u;
 
 } // namespace
@@ -28,7 +27,6 @@ bool Playback::open(const std::string& path, std::string& error)
         error_ = error;
         return false;
     }
-
     uint8_t header[64]{};
     file_.read(reinterpret_cast<char*>(header), sizeof(header));
     if (file_.gcount() != static_cast<std::streamsize>(sizeof(header)))
@@ -50,9 +48,65 @@ bool Playback::open(const std::string& path, std::string& error)
     const uint32_t version = reader.u32();
     const uint32_t header_size = reader.u32();
     const uint32_t endian = reader.u32();
-    if (!reader.ok() || version != kVersion || endian != kEndianMarker || header_size < 28 || header_size > 4096)
+    if (!reader.ok() || endian != kEndianMarker || header_size < 28 || header_size > 4096)
     {
         error = "unsupported session format or endianness";
+        close();
+        error_ = error;
+        return false;
+    }
+    if (version == 1)
+    {
+        error = "session format v1 uses the legacy coordinate frame and cannot be replayed; record a new v8 session";
+        close();
+        error_ = error;
+        return false;
+    }
+    if (version == 2)
+    {
+        error = "session format v2 predates LiDAR records and cannot be replayed; record a new v8 session";
+        close();
+        error_ = error;
+        return false;
+    }
+    if (version == 3)
+    {
+        error = "session format v3 predates ToF records and cannot be replayed; record a new v8 session";
+        close();
+        error_ = error;
+        return false;
+    }
+    if (version == 4)
+    {
+        error = "session format v4 predates scan-burst and fixed-anchor fields; record a new v8 session";
+        close();
+        error_ = error;
+        return false;
+    }
+    if (version == 5)
+    {
+        error = "session format v5 uses the smaller occupancy-grid profile; record a new v8 session";
+        close();
+        error_ = error;
+        return false;
+    }
+    if (version == 6)
+    {
+        error = "session format v6 predates wall-pad presence records; record a new v8 session";
+        close();
+        error_ = error;
+        return false;
+    }
+    if (version == 7)
+    {
+        error = "session format v7 predates wrist orientation records; record a new v8 session";
+        close();
+        error_ = error;
+        return false;
+    }
+    if (version != kSessionFormatVersion)
+    {
+        error = "unsupported session format version " + std::to_string(version);
         close();
         error_ = error;
         return false;
@@ -296,6 +350,28 @@ bool Playback::next(PlaybackFrame& frame)
             ++stats_.sensor_records;
             break;
         }
+        case RecordType::Lidar:
+        {
+            frame_id = reader.u32();
+            frame_timestamp = reader.u64();
+            LidarScan scan = readLidarScan(reader);
+            if (!reader.ok()) continue;
+            frame.sensors.lidar = std::move(scan);
+            saw_sensor = true;
+            ++stats_.sensor_records;
+            break;
+        }
+        case RecordType::Tof:
+        {
+            frame_id = reader.u32();
+            frame_timestamp = reader.u64();
+            TofScan scan = readTofScan(reader);
+            if (!reader.ok()) continue;
+            frame.sensors.tof = std::move(scan);
+            saw_sensor = true;
+            ++stats_.sensor_records;
+            break;
+        }
         case RecordType::Uwb:
         {
             frame_id = reader.u32();
@@ -314,6 +390,31 @@ bool Playback::next(PlaybackFrame& frame)
             NoveldaMeasurement sample = readNovelda(reader);
             if (!reader.ok()) continue;
             frame.sensors.novelda.push_back(sample);
+            saw_sensor = true;
+            ++stats_.sensor_records;
+            break;
+        }
+        case RecordType::Wallpad:
+        {
+            frame_id = reader.u32();
+            frame_timestamp = reader.u64();
+            PresenceZone zone = readZone(reader);
+            if (!reader.ok()) continue;
+            frame.sensors.wallpad_zones.push_back(zone);
+            saw_sensor = true;
+            ++stats_.sensor_records;
+            break;
+        }
+        case RecordType::WristOrientation:
+        {
+            frame_id = reader.u32();
+            frame_timestamp = reader.u64();
+            WristOrientation orientation{};
+            orientation.timestamp_ms = frame_timestamp;
+            orientation.wrist_yaw_deg = reader.f32();
+            orientation.wrist_pitch_deg = reader.f32();
+            if (!reader.ok()) continue;
+            frame.sensors.wrist_orientation = orientation;
             saw_sensor = true;
             ++stats_.sensor_records;
             break;

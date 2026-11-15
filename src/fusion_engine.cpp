@@ -9,6 +9,8 @@ namespace {
 
 constexpr uint64_t kImuTimeoutMs = 350;
 constexpr uint64_t kRadarTimeoutMs = 650;
+constexpr uint64_t kLidarTimeoutMs = 650;
+constexpr uint64_t kTofTimeoutMs = 650;
 constexpr uint64_t kUwbTimeoutMs = 2200;
 constexpr uint64_t kNoveldaTimeoutMs = 2200;
 constexpr uint64_t kUltrasonicTimeoutMs = 750;
@@ -36,27 +38,33 @@ void FusionEngine::reset()
     active_zones_.clear();
     last_imu_ms_.reset();
     last_radar_ms_.reset();
+    last_lidar_ms_.reset();
+    last_tof_ms_.reset();
     last_uwb_ms_.reset();
     last_novelda_ms_.reset();
     last_ultrasonic_ms_.reset();
     last_process_ms_.reset();
     last_map_refresh_ms_.reset();
-    health_ = SensorHealth{false, false, false, false, false, 0.0f};
+    health_ = SensorHealth{false, false, false, false, false, false, false, 0.0f};
 }
 
 void FusionEngine::updateHealth(uint64_t now_ms)
 {
     health_.imu = fresh(last_imu_ms_, now_ms, kImuTimeoutMs);
     health_.radar = fresh(last_radar_ms_, now_ms, kRadarTimeoutMs);
+    health_.lidar = fresh(last_lidar_ms_, now_ms, kLidarTimeoutMs);
+    health_.tof = fresh(last_tof_ms_, now_ms, kTofTimeoutMs);
     health_.uwb = fresh(last_uwb_ms_, now_ms, kUwbTimeoutMs);
     health_.novelda = fresh(last_novelda_ms_, now_ms, kNoveldaTimeoutMs);
     health_.ultrasonic = fresh(last_ultrasonic_ms_, now_ms, kUltrasonicTimeoutMs);
     health_.health_score =
-        0.25f * (health_.imu ? 1.0f : 0.0f) +
-        0.40f * (health_.radar ? 1.0f : 0.0f) +
-        0.10f * (health_.uwb ? 1.0f : 0.0f) +
-        0.15f * (health_.novelda ? 1.0f : 0.0f) +
-        0.10f * (health_.ultrasonic ? 1.0f : 0.0f);
+        0.17f * (health_.imu ? 1.0f : 0.0f) +
+        0.28f * (health_.radar ? 1.0f : 0.0f) +
+        0.18f * (health_.lidar ? 1.0f : 0.0f) +
+        0.12f * (health_.tof ? 1.0f : 0.0f) +
+        0.09f * (health_.uwb ? 1.0f : 0.0f) +
+        0.09f * (health_.novelda ? 1.0f : 0.0f) +
+        0.07f * (health_.ultrasonic ? 1.0f : 0.0f);
 }
 
 std::vector<Detection> FusionEngine::radarToWorld(const RadarFrame& radar) const
@@ -217,7 +225,7 @@ void FusionEngine::updateUwb(const std::vector<UwbMeasurement>& measurements, ui
         const Vec3 body = slam_.worldToBody(track.filter.position());
         const float range_pred = std::sqrt(body.x * body.x + body.y * body.y);
         if (range_pred < 0.15f) continue;
-        const float bearing_pred = std::atan2(body.y, body.x);
+        const float bearing_pred = std::atan2(body.x, body.y);
         const Vec3 world_delta = track.filter.position() - Vec3{slam_.pose().x, slam_.pose().y, 0.0f};
         const Vec3 unit = normalized(Vec3{world_delta.x, world_delta.y, 0.0f});
         const float range_rate_pred = dot(track.filter.velocity(), unit);
@@ -225,7 +233,7 @@ void FusionEngine::updateUwb(const std::vector<UwbMeasurement>& measurements, ui
         for (std::size_t mi = 0; mi < measurements.size(); ++mi)
         {
             const auto& uwb = measurements[mi];
-            if (uwb.tag_id == 0 || uwb.range_m <= 0.05f) continue;
+            if (uwb.is_fixed_anchor || uwb.tag_id == 0 || uwb.range_m <= 0.05f) continue;
             const float range_error = std::abs(uwb.range_m - range_pred);
             if (range_error > std::max(0.75f, 3.0f * config_.tag_range_sigma_m)) continue;
 
@@ -265,7 +273,9 @@ void FusionEngine::updateUwb(const std::vector<UwbMeasurement>& measurements, ui
     }
 }
 
-void FusionEngine::updatePresence(const std::vector<NoveldaMeasurement>& measurements, uint64_t now_ms)
+void FusionEngine::updatePresence(const std::vector<NoveldaMeasurement>& measurements,
+                                  const std::vector<PresenceZone>& wallpad_zones,
+                                  uint64_t now_ms)
 {
     for (const auto& sample : measurements)
     {
@@ -279,14 +289,27 @@ void FusionEngine::updatePresence(const std::vector<NoveldaMeasurement>& measure
         zone.confidence = clampf(sample.confidence * (sample.through_barrier ? 0.82f : 1.0f), 0.0f, 1.0f);
         active_zones_.push_back(TimedZone{zone, now_ms});
     }
+    for (const PresenceZone& zone : wallpad_zones)
+    {
+        if (!std::isfinite(zone.range_min) || !std::isfinite(zone.range_max) ||
+            !std::isfinite(zone.bearing_center_rad) || !std::isfinite(zone.bearing_width_rad) ||
+            !std::isfinite(zone.confidence) || zone.range_min <= 0.05f ||
+            zone.range_max <= zone.range_min || zone.range_max > 35.0f ||
+            zone.bearing_width_rad <= 0.0f || zone.bearing_width_rad > degToRad(170.0f) ||
+            zone.confidence < 0.05f)
+            continue;
+        PresenceZone bounded_zone = zone;
+        bounded_zone.bearing_center_rad = wrapRad(zone.bearing_center_rad);
+        bounded_zone.confidence = clampf(zone.confidence, 0.0f, 1.0f);
+        active_zones_.push_back(TimedZone{bounded_zone, now_ms});
+    }
 
     const uint64_t timeout = static_cast<uint64_t>(config_.presence_timeout_s * 1000.0f);
     while (!active_zones_.empty() && now_ms > active_zones_.front().seen_ms + timeout)
         active_zones_.pop_front();
     while (active_zones_.size() > 16) active_zones_.pop_front();
 
-    // Novelda can only reinforce tracks that already exist. It is deliberately
-    // impossible for this loop to create a track.
+    // Presence zones can only reinforce tracks that already exist.
     const auto& all_tracks = tracks_.tracks();
     for (const auto& timed : active_zones_)
     {
@@ -299,7 +322,7 @@ void FusionEngine::updatePresence(const std::vector<NoveldaMeasurement>& measure
             const float sigma = std::max(0.15f, track.position_sigma_m);
             if (range < zone.range_min - sigma || range > zone.range_max + sigma) continue;
 
-            const float bearing = std::atan2(body.y, body.x);
+            const float bearing = std::atan2(body.x, body.y);
             const float angular_sigma = std::atan2(sigma, std::max(0.30f, range));
             const float allowed = 0.5f * zone.bearing_width_rad + angular_sigma;
             if (std::abs(wrapRad(bearing - zone.bearing_center_rad)) > allowed) continue;
@@ -310,7 +333,10 @@ void FusionEngine::updatePresence(const std::vector<NoveldaMeasurement>& measure
     }
 }
 
-void FusionEngine::updateMap(const std::vector<Detection>& world_detections, uint64_t now_ms)
+void FusionEngine::updateMap(const LidarScan* lidar_scan,
+                             const TofScan* tof_scan,
+                             const std::vector<Detection>& radar_detections,
+                             uint64_t now_ms)
 {
     occupancy_.decay(config_.occupancy_decay);
 
@@ -320,24 +346,80 @@ void FusionEngine::updateMap(const std::vector<Detection>& world_detections, uin
     if (!schematic_.empty()) schematic_.applyToGrid(occupancy_);
 
     const auto& all_tracks = tracks_.tracks();
-    const Vec3 origin{slam_.pose().x, slam_.pose().y, 0.0f};
-    for (const auto& detection : world_detections)
+    if (tof_scan && health_.tof)
     {
-        if (!(detection.snr > 1.0f)) continue;
-        if (detection.range > config_.max_mapping_range_m) continue;
-
-        bool near_person = false;
-        for (const auto& track : all_tracks)
+        for (const SurfaceRay& ray : tof_scan->rays)
         {
-            const Vec3 delta = detection.position - track.filter.position();
-            if (std::sqrt(delta.x * delta.x + delta.y * delta.y) < config_.map_people_exclusion_m)
+            if (!std::isfinite(ray.origin.x) || !std::isfinite(ray.origin.y) ||
+                !std::isfinite(ray.origin.z) || !std::isfinite(ray.endpoint.x) ||
+                !std::isfinite(ray.endpoint.y) || !std::isfinite(ray.endpoint.z))
+                continue;
+            if (norm(ray.endpoint - ray.origin) > 4.0f) continue;
+
+            const Vec3 endpoint = slam_.bodyToWorld(ray.endpoint);
+            bool near_person = false;
+            for (const auto& track : all_tracks)
             {
-                near_person = true;
-                break;
+                const Vec3 delta = endpoint - track.filter.position();
+                if (std::sqrt(delta.x * delta.x + delta.y * delta.y) < config_.map_people_exclusion_m)
+                {
+                    near_person = true;
+                    break;
+                }
+            }
+            if (near_person) continue;
+
+            occupancy_.integrateRay(slam_.bodyToWorld(ray.origin), endpoint, 0.78f, -0.28f, 4.0f);
+        }
+    }
+
+    if (health_.lidar)
+    {
+        if (lidar_scan)
+        {
+            const Vec3 origin = slam_.bodyToWorld(lidar_scan->origin);
+            for (const Vec3& point : lidar_scan->points)
+            {
+                if (!std::isfinite(point.x) || !std::isfinite(point.y) || !std::isfinite(point.z)) continue;
+                if (norm(point - lidar_scan->origin) > config_.grid.range_m) continue;
+                const Vec3 endpoint = slam_.bodyToWorld(point);
+
+                bool near_person = false;
+                for (const auto& track : all_tracks)
+                {
+                    const Vec3 delta = endpoint - track.filter.position();
+                    if (std::sqrt(delta.x * delta.x + delta.y * delta.y) < config_.map_people_exclusion_m)
+                    {
+                        near_person = true;
+                        break;
+                    }
+                }
+                if (near_person) continue;
+                occupancy_.integrateRay(origin, endpoint, 0.85f, -0.35f, config_.grid.range_m);
             }
         }
-        if (near_person) continue;
-        occupancy_.integrateRay(origin, detection.position, 0.85f, -0.35f, config_.max_mapping_range_m);
+    }
+    else if (!health_.tof)
+    {
+        const Vec3 origin{slam_.pose().x, slam_.pose().y, 0.0f};
+        for (const auto& detection : radar_detections)
+        {
+            if (!(detection.snr > 1.0f)) continue;
+            if (detection.range > config_.max_mapping_range_m) continue;
+
+            bool near_person = false;
+            for (const auto& track : all_tracks)
+            {
+                const Vec3 delta = detection.position - track.filter.position();
+                if (std::sqrt(delta.x * delta.x + delta.y * delta.y) < config_.map_people_exclusion_m)
+                {
+                    near_person = true;
+                    break;
+                }
+            }
+            if (near_person) continue;
+            occupancy_.integrateRay(origin, detection.position, 0.85f, -0.35f, config_.max_mapping_range_m);
+        }
     }
 
     const uint64_t interval_ms = static_cast<uint64_t>(config_.map_refresh_interval_s * 1000.0f);
@@ -378,11 +460,41 @@ WorldModel FusionEngine::process(const SensorFrame& frame)
         slam_.update(*frame.imu, dt);
     }
 
+    if (frame.lidar)
+        last_lidar_ms_ = frame.lidar->timestamp_ms;
+    if (frame.tof)
+        last_tof_ms_ = frame.tof->timestamp_ms;
+    if (frame.radar)
+        last_radar_ms_ = frame.radar->timestamp_ms;
+    if (!frame.uwb.empty())
+        last_uwb_ms_ = now_ms;
+    if (!frame.novelda.empty())
+        last_novelda_ms_ = now_ms;
+    if (frame.ultrasonic)
+        last_ultrasonic_ms_ = frame.ultrasonic->timestamp_ms;
+    updateHealth(now_ms);
+    for (const UwbMeasurement& measurement : frame.uwb)
+    {
+        if (measurement.is_fixed_anchor) slam_.correctPose(measurement);
+    }
+
+    WorldModel map_context{};
+    map_context.health = health_;
+    const float prior_environment_confidence =
+        confidence_.evaluate(map_context, slam_, occupancy_).environment;
+    const bool lidar_fresh =
+        frame.lidar && fresh(last_lidar_ms_, now_ms, kLidarTimeoutMs);
+    bool loop_closure_applied = false;
+    if (lidar_fresh)
+        loop_closure_applied =
+            slam_.update(*frame.lidar, occupancy_, prior_environment_confidence);
+    if (frame.tof && fresh(last_tof_ms_, now_ms, kTofTimeoutMs) &&
+        (!lidar_fresh || frame.lidar->points.size() < 8))
+        slam_.update(*frame.tof, occupancy_, prior_environment_confidence);
+
     std::vector<Detection> world_detections;
     if (frame.radar)
     {
-        last_radar_ms_ = frame.radar->timestamp_ms;
-        slam_.update(*frame.radar, occupancy_);
         world_detections = radarToWorld(*frame.radar);
         world_detections.erase(std::remove_if(world_detections.begin(), world_detections.end(), [](const Detection& d) {
                                    return !std::isfinite(d.position.x) || !std::isfinite(d.position.y) ||
@@ -396,23 +508,15 @@ WorldModel FusionEngine::process(const SensorFrame& frame)
     const std::vector<Detection> person_candidates = selectPersonCandidates(world_detections);
     tracks_.process(dt, person_candidates, now_ms);
 
-    if (!frame.uwb.empty())
+    if (!frame.uwb.empty()) updateUwb(frame.uwb, now_ms);
+    if (!frame.novelda.empty() || !frame.wallpad_zones.empty())
     {
-        last_uwb_ms_ = now_ms;
-        updateUwb(frame.uwb, now_ms);
+        updatePresence(frame.novelda, frame.wallpad_zones, now_ms);
     }
-    if (!frame.novelda.empty())
-    {
-        last_novelda_ms_ = now_ms;
-        updatePresence(frame.novelda, now_ms);
-    }
-    if (frame.ultrasonic)
-    {
-        last_ultrasonic_ms_ = frame.ultrasonic->timestamp_ms;
-    }
-
-    updateMap(world_detections, now_ms);
-    updateHealth(now_ms);
+    updateMap(frame.lidar ? &*frame.lidar : nullptr,
+              frame.tof ? &*frame.tof : nullptr,
+              world_detections,
+              now_ms);
 
     WorldModel world{};
     world.timestamp_ms = now_ms;
@@ -438,6 +542,8 @@ WorldModel FusionEngine::process(const SensorFrame& frame)
     for (const auto& timed : active_zones_) world.zones.push_back(timed.zone);
 
     confidence_.apply(world, slam_, occupancy_);
+    if (loop_closure_applied)
+        world.environment_confidence = clampf(world.environment_confidence + 0.05f, 0.0f, 0.99f);
     return world;
 }
 

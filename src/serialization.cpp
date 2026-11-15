@@ -131,6 +131,8 @@ void writeSensorHealth(BinaryWriter& writer, const SensorHealth& health)
 {
     writer.boolean(health.imu);
     writer.boolean(health.radar);
+    writer.boolean(health.lidar);
+    writer.boolean(health.tof);
     writer.boolean(health.uwb);
     writer.boolean(health.novelda);
     writer.boolean(health.ultrasonic);
@@ -142,6 +144,8 @@ SensorHealth readSensorHealth(BinaryReader& reader)
     SensorHealth health{};
     health.imu = reader.boolean();
     health.radar = reader.boolean();
+    health.lidar = reader.boolean();
+    health.tof = reader.boolean();
     health.uwb = reader.boolean();
     health.novelda = reader.boolean();
     health.ultrasonic = reader.boolean();
@@ -209,6 +213,61 @@ RadarFrame readRadarFrame(BinaryReader& reader)
     return frame;
 }
 
+void writeLidarScan(BinaryWriter& writer, const LidarScan& scan)
+{
+    writer.u64(scan.timestamp_ms);
+    writer.vec3(scan.origin);
+    writer.u32(static_cast<uint32_t>(scan.points.size()));
+    for (const auto& point : scan.points) writer.vec3(point);
+    writer.boolean(scan.burst_active);
+    writer.boolean(scan.burst_complete);
+}
+
+LidarScan readLidarScan(BinaryReader& reader)
+{
+    LidarScan scan{};
+    scan.timestamp_ms = reader.u64();
+    scan.origin = reader.vec3();
+    const uint32_t count = reader.u32();
+    if (count > kMaxLidarPointsPerScan)
+    {
+        reader.invalidate();
+        return scan;
+    }
+    scan.points.reserve(count);
+    for (uint32_t i = 0; i < count && reader.ok(); ++i) scan.points.push_back(reader.vec3());
+    scan.burst_active = reader.boolean();
+    scan.burst_complete = reader.boolean();
+    return scan;
+}
+
+void writeTofScan(BinaryWriter& writer, const TofScan& scan)
+{
+    writer.u64(scan.timestamp_ms);
+    writer.u32(static_cast<uint32_t>(scan.rays.size()));
+    for (const auto& ray : scan.rays)
+    {
+        writer.vec3(ray.origin);
+        writer.vec3(ray.endpoint);
+    }
+}
+
+TofScan readTofScan(BinaryReader& reader)
+{
+    TofScan scan{};
+    scan.timestamp_ms = reader.u64();
+    const uint32_t count = reader.u32();
+    if (count > kMaxTofRaysPerScan)
+    {
+        reader.invalidate();
+        return scan;
+    }
+    scan.rays.reserve(count);
+    for (uint32_t i = 0; i < count && reader.ok(); ++i)
+        scan.rays.push_back(SurfaceRay{reader.vec3(), reader.vec3()});
+    return scan;
+}
+
 void writeUwb(BinaryWriter& writer, const UwbMeasurement& sample)
 {
     writer.u64(sample.timestamp_ms);
@@ -219,6 +278,9 @@ void writeUwb(BinaryWriter& writer, const UwbMeasurement& sample)
     writer.boolean(sample.has_range_rate);
     writer.f32(sample.range_rate_mps);
     writer.f32(sample.confidence);
+    writer.boolean(sample.is_fixed_anchor);
+    writer.f32(sample.anchor_x_m);
+    writer.f32(sample.anchor_y_m);
 }
 
 UwbMeasurement readUwb(BinaryReader& reader)
@@ -232,6 +294,9 @@ UwbMeasurement readUwb(BinaryReader& reader)
     sample.has_range_rate = reader.boolean();
     sample.range_rate_mps = reader.f32();
     sample.confidence = reader.f32();
+    sample.is_fixed_anchor = reader.boolean();
+    sample.anchor_x_m = reader.f32();
+    sample.anchor_y_m = reader.f32();
     return sample;
 }
 

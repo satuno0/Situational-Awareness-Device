@@ -1,8 +1,10 @@
 #include "announcer.hpp"
 #include "fusion_engine.hpp"
+#include "lidar_driver.hpp"
 #include "marker_detector.hpp"
 #include "occupancy_grid.hpp"
 #include "playback.hpp"
+#include "radar_driver.hpp"
 #include "recorder.hpp"
 #include "schematic.hpp"
 #include "sensor_mode.hpp"
@@ -11,14 +13,18 @@
 #include "track_manager.hpp"
 #include "types.hpp"
 #include "wrist_haptics.hpp"
+#include "wallpad_driver.hpp"
 
 #include <cmath>
+#include <array>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <fstream>
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -66,30 +72,74 @@ std::vector<Detection> makePersonCluster(float x, float y)
 void testOccupancyGrid()
 {
     OccupancyGrid grid;
+    check(grid.config().width == 280 && grid.config().height == 280 &&
+              grid.totalCellCount() == 280 * 280,
+          "default occupancy grid is pre-sized to 280 by 280 cells");
+    int far_cx = 0;
+    int far_cy = 0;
+    check(grid.worldToCell(0.0f, 30.0f, far_cx, far_cy) &&
+              grid.worldToCell(30.0f, 0.0f, far_cx, far_cy),
+          "30 m all-terrain scan endpoints fit within the default map");
+    check(!grid.worldToCell(35.0f, 0.0f, far_cx, far_cy),
+          "default map edge is bounded at 35 m");
     int cx = 0;
     int cy = 0;
     check(grid.worldToCell(1.0f, 1.0f, cx, cy), "worldToCell in range");
+    int right_cx = 0;
+    int right_cy = 0;
+    int forward_cx = 0;
+    int forward_cy = 0;
+    check(grid.worldToCell(1.0f, 0.0f, right_cx, right_cy) &&
+              grid.worldToCell(0.0f, 1.0f, forward_cx, forward_cy),
+          "right and forward axes map into the grid");
+    check(right_cx > grid.config().width / 2 && right_cy == grid.config().height / 2 &&
+              forward_cx == grid.config().width / 2 && forward_cy > grid.config().height / 2,
+          "grid +X is right and +Y is forward");
     grid.setProbability(cx, cy, 0.9f);
     grid.decay(0.5f);
     check(near(grid.probability(cx, cy), 0.7f, 1.0e-5f), "mandatory decay pulls probability toward 0.5");
 
     OccupancyGrid ray_grid;
-    check(ray_grid.integrateRay({0.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 0.0f}, 0.85f, -0.35f, 20.0f),
+    check(ray_grid.integrateRay({0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, 0.85f, -0.35f, 20.0f),
           "integrateRay accepts a valid ray");
     int ex = 0;
     int ey = 0;
-    ray_grid.worldToCell(1.0f, 0.0f, ex, ey);
+    ray_grid.worldToCell(0.0f, 1.0f, ex, ey);
 
     OccupancyGrid stamp_grid;
-    stamp_grid.markOccupiedWorld({1.0f, 0.0f, 0.0f}, 0.85f);
+    stamp_grid.markOccupiedWorld({0.0f, 1.0f, 0.0f}, 0.85f);
 
     check(near(ray_grid.probability(ex, ey), stamp_grid.probability(ex, ey), 1.0e-6f),
           "ray endpoint receives occupied evidence exactly once");
 
     int free_cx = 0;
     int free_cy = 0;
-    check(ray_grid.worldToCell(0.25f, 0.0f, free_cx, free_cy), "free-space sample cell is in range");
+    check(ray_grid.worldToCell(0.0f, 0.25f, free_cx, free_cy), "free-space sample cell is in range");
     check(ray_grid.probability(free_cx, free_cy) < 0.5f, "free-space traversal lowers occupancy");
+}
+
+void testRearRadarRotation()
+{
+    RadarConfig rear_config;
+    rear_config.yaw_offset_deg = 180.0f;
+    RadarFrame frame;
+    Detection detection = makeDetection(1.0f, 2.0f, 0.5f);
+    detection.velocity = {0.25f, -0.5f, 0.1f};
+    frame.detections.push_back(detection);
+
+    RadarDriver::transformToBody(frame, rear_config);
+    check(frame.detections.size() == 1, "rear radar transform preserves detection count");
+    if (!frame.detections.empty())
+    {
+        const Detection& rotated = frame.detections.front();
+        check(near(rotated.position.x, -1.0f, 1.0e-5f) &&
+                  near(rotated.position.y, -2.0f, 1.0e-5f) &&
+                  near(rotated.position.z, 0.5f, 1.0e-5f),
+              "rear radar position rotates 180 degrees into the canonical frame");
+        check(near(rotated.velocity.x, -0.25f, 1.0e-5f) &&
+                  near(rotated.velocity.y, 0.5f, 1.0e-5f),
+              "rear radar velocity rotates with its position");
+    }
 }
 
 void testKalmanTrack()
@@ -113,7 +163,7 @@ void testKalmanTrack()
 void testTrackManagerIdentityPersistence()
 {
     TrackManager manager;
-    std::vector<Detection> detections{makeDetection(2.0f, 0.0f)};
+    std::vector<Detection> detections{makeDetection(0.0f, 2.0f)};
     manager.process(0.05f, detections, 1000);
     check(manager.tracks().size() == 1, "first detection spawns one track");
     const uint32_t id = manager.tracks().front().id;
@@ -145,7 +195,7 @@ void testTrackManagerIdentityPersistence()
 void testPresenceSupportRules()
 {
     TrackManager manager;
-    std::vector<Detection> detections{makeDetection(2.0f, 0.0f)};
+    std::vector<Detection> detections{makeDetection(0.0f, 2.0f)};
     manager.process(0.05f, detections, 1000);
     const uint32_t id = manager.tracks().front().id;
     check(!manager.applyPresenceSupport(id, 0.9f, 1000), "Novelda cannot reinforce a visible track");
@@ -156,6 +206,46 @@ void testPresenceSupportRules()
     check(manager.applyPresenceSupport(id, 0.9f, 1100), "Novelda can reinforce an occluded track");
     check(manager.findTrack(id) != nullptr && manager.findTrack(id)->state == TrackState::PRESENCE_SUPPORTED,
           "presence support sets PRESENCE_SUPPORTED");
+}
+
+void testWallpadPresenceRules()
+{
+    FusionEngine fusion;
+    SensorFrame radar_frame;
+    radar_frame.frame_id = 1;
+    radar_frame.timestamp_ms = 1000;
+    RadarFrame radar;
+    radar.timestamp_ms = 1000;
+    radar.detections = makePersonCluster(0.0f, 2.0f);
+    radar_frame.radar = radar;
+    check(fusion.process(radar_frame).tracks.size() == 1,
+          "radar creates a track before wall-pad presence support");
+
+    SensorFrame coast_frame;
+    coast_frame.frame_id = 2;
+    coast_frame.timestamp_ms = 1050;
+    const WorldModel coasting = fusion.process(coast_frame);
+    check(coasting.tracks.size() == 1 && coasting.tracks.front().state == TrackState::OCCLUDED,
+          "track becomes occluded before wall-pad support");
+
+    SensorFrame presence_frame;
+    presence_frame.frame_id = 3;
+    presence_frame.timestamp_ms = 1100;
+    presence_frame.wallpad_zones.push_back({1.2f, 2.8f, 0.0f, degToRad(60.0f), 0.9f});
+    const WorldModel supported = fusion.process(presence_frame);
+    check(supported.tracks.size() == 1 &&
+              supported.tracks.front().state == TrackState::PRESENCE_SUPPORTED,
+          "wall-pad sector reinforces an existing occluded radar track");
+    check(supported.zones.size() == 1,
+          "wall-pad sector remains available in the world model");
+
+    FusionEngine presence_only;
+    SensorFrame untracked_presence;
+    untracked_presence.frame_id = 1;
+    untracked_presence.timestamp_ms = 2000;
+    untracked_presence.wallpad_zones.push_back({1.0f, 3.0f, 0.0f, degToRad(45.0f), 0.8f});
+    check(presence_only.process(untracked_presence).tracks.empty(),
+          "wall-pad presence never creates a standalone track");
 }
 
 uint32_t gridHash(const WorldModel& world)
@@ -201,6 +291,156 @@ void testNoveldaOnlyCreatesNoTracks()
     check(world.tracks.empty(), "Novelda presence alone never creates a track");
 }
 
+void testImuStationaryZupt()
+{
+    SlamManager slam;
+    ImuSample sample;
+    sample.accel_mps2 = {2.0f, 0.0f, kGravity};
+    for (int i = 0; i < 10; ++i)
+    {
+        sample.timestamp_ms += 20;
+        slam.update(sample, 0.02f);
+    }
+    check(norm(slam.egoVelocity()) > 0.05f, "IMU acceleration produces an ego-motion estimate");
+
+    sample.accel_mps2 = {0.0f, 0.0f, kGravity};
+    sample.gyro_radps = {0.0f, 0.0f, 0.0f};
+    for (int i = 0; i < 25; ++i)
+    {
+        sample.timestamp_ms += 20;
+        slam.update(sample, 0.02f);
+    }
+    check(slam.ahrs().stationary(), "stationary IMU samples engage the ZUPT lock");
+    check(norm(slam.egoVelocity()) < 1.0e-5f, "ZUPT resets accumulated translational velocity");
+}
+
+void testCorrelativeTofScanMatching()
+{
+    OccupancyGrid grid;
+    const std::vector<Vec3> landmarks{
+        {-0.875f, 1.125f, 0.0f}, {-0.375f, 1.875f, 0.0f}, {0.125f, 2.625f, 0.0f},
+        {0.625f, 3.375f, 0.0f},  {1.125f, 4.125f, 0.0f},  {-1.375f, 2.375f, 0.0f},
+        {0.875f, 1.375f, 0.0f},  {-0.125f, 3.875f, 0.0f}, {1.625f, 2.125f, 0.0f},
+        {-1.875f, 4.375f, 0.0f}};
+    for (const Vec3& point : landmarks)
+    {
+        int cx = 0;
+        int cy = 0;
+        check(grid.worldToCell(point.x, point.y, cx, cy), "scan-matching landmark is inside the map");
+        grid.setProbability(cx, cy, 0.95f);
+    }
+
+    TofScan scan;
+    for (const Vec3& point : landmarks)
+        scan.rays.push_back({{0.0f, 0.0f, 0.0f}, point});
+
+    SlamManager slam;
+    slam.setPose({0.18f, 0.0f, 0.0f});
+    slam.update(scan, grid, 0.50f);
+    check(near(slam.pose().x, 0.18f, 1.0e-5f),
+          "ToF scan matching remains disabled at the environment-confidence threshold");
+    slam.update(scan, grid, 0.80f);
+    check(slam.pose().x < 0.15f && slam.pose().x > 0.0f,
+          "correlative ToF matching reduces local x drift by at least 3 cm");
+}
+
+void testLongRangeScanMatching()
+{
+    OccupancyGrid grid;
+    const std::vector<Vec3> landmarks{
+        {0.20f, 10.20f, 0.0f}, {0.45f, 12.20f, 0.0f}, {0.70f, 14.20f, 0.0f},
+        {0.95f, 16.20f, 0.0f}, {1.20f, 18.20f, 0.0f}, {-0.05f, 20.20f, 0.0f},
+        {-0.30f, 22.20f, 0.0f}, {-0.55f, 24.20f, 0.0f}, {-0.80f, 26.20f, 0.0f},
+        {-1.05f, 28.20f, 0.0f}};
+    for (const Vec3& point : landmarks)
+    {
+        int cx = 0;
+        int cy = 0;
+        check(grid.worldToCell(point.x, point.y, cx, cy), "30 m scan landmark is within map bounds");
+        grid.setProbability(cx, cy, 0.95f);
+    }
+
+    TofScan scan;
+    for (const Vec3& point : landmarks)
+        scan.rays.push_back({{0.0f, 0.0f, 0.0f}, point});
+
+    SlamManager slam;
+    slam.setPose({0.12f, 0.0f, 0.0f});
+    slam.update(scan, grid, 0.80f);
+    check(slam.pose().x < 0.07f && slam.pose().x > -0.04f,
+          "30 m scan returns a drifted pose toward mapped landmarks");
+}
+
+void testBurstLoopClosure()
+{
+    OccupancyGrid grid;
+    const std::vector<Vec3> scan_points{
+        {-2.625f, -0.125f, 0.0f}, {-2.125f, 1.375f, 0.0f}, {-1.125f, 2.625f, 0.0f},
+        {0.125f, 3.625f, 0.0f},   {1.625f, 2.875f, 0.0f},  {2.625f, 1.375f, 0.0f},
+        {3.125f, -0.125f, 0.0f},  {2.375f, -1.625f, 0.0f}, {1.125f, -2.625f, 0.0f},
+        {-0.375f, -3.125f, 0.0f}, {-1.875f, -2.375f, 0.0f}, {-3.125f, -1.375f, 0.0f},
+        {-1.625f, 0.375f, 0.0f},  {0.625f, 1.125f, 0.0f},  {1.375f, -0.375f, 0.0f},
+        {-0.625f, -1.125f, 0.0f}};
+    for (const Vec3& point : scan_points)
+    {
+        int cx = 0;
+        int cy = 0;
+        check(grid.worldToCell(point.x, point.y, cx, cy), "loop-closure landmark is inside the map");
+        grid.setProbability(cx, cy, 0.95f);
+    }
+
+    SlamManager slam;
+    slam.setPose({1.0f, -0.5f, 12.0f});
+    LidarScan active_burst;
+    active_burst.points = scan_points;
+    active_burst.burst_active = true;
+    slam.update(active_burst, grid, 0.49f);
+    check(near(slam.pose().x, 1.0f, 1.0e-5f),
+          "loop closure is deferred until a burst-completion event");
+    const float confidence_before_closure = slam.confidence();
+
+    LidarScan completed_burst;
+    completed_burst.burst_complete = true;
+    slam.update(completed_burst, grid, 0.80f);
+    check(std::abs(slam.pose().x) < 0.20f && std::abs(slam.pose().y) < 0.20f &&
+              std::abs(slam.pose().yaw_deg) < 3.0f,
+          "completed 360-degree burst snaps to a high-confidence mapped pose");
+    check(slam.confidence() > confidence_before_closure,
+          "successful loop closure increases localization confidence");
+
+    OccupancyGrid unmapped_grid;
+    SlamManager rejected;
+    rejected.setPose({1.0f, -0.5f, 12.0f});
+    check(!rejected.detectLoopClosure(scan_points, unmapped_grid, 0.80f) &&
+              near(rejected.pose().x, 1.0f, 1.0e-5f),
+          "loop closure rejects scans without enough high-confidence map matches");
+}
+
+void testUwbAnchorCorrection()
+{
+    UwbMeasurement anchor;
+    anchor.tag_id = 17;
+    anchor.range_m = 1.0f;
+    anchor.confidence = 0.8f;
+    anchor.is_fixed_anchor = true;
+    anchor.anchor_x_m = 2.0f;
+    anchor.anchor_y_m = 0.0f;
+
+    SlamManager slam;
+    slam.correctPose(anchor);
+    check(slam.pose().x > 0.0f && slam.pose().x < 1.0f,
+          "fixed UWB anchor softly pulls pose toward its measured range circle");
+
+    FusionEngine fusion;
+    SensorFrame frame;
+    frame.timestamp_ms = 1000;
+    anchor.timestamp_ms = 1000;
+    frame.uwb.push_back(anchor);
+    const WorldModel world = fusion.process(frame);
+    check(world.pose.x > 0.0f && world.tracks.empty(),
+          "fixed UWB anchor constrains device pose without creating a person track");
+}
+
 void testUwbAssociation()
 {
     FusionEngine fusion;
@@ -210,7 +450,7 @@ void testUwbAssociation()
     radar_frame.timestamp_ms = 1000;
     RadarFrame radar;
     radar.timestamp_ms = 1000;
-    const auto person = makePersonCluster(2.0f, 0.0f);
+    const auto person = makePersonCluster(0.0f, 2.0f);
     radar.detections.insert(radar.detections.end(), person.begin(), person.end());
     radar_frame.radar = radar;
     const WorldModel first = fusion.process(radar_frame);
@@ -247,7 +487,7 @@ void testPresenceFusionNeedsOverlap()
     radar_frame.timestamp_ms = 1000;
     RadarFrame radar;
     radar.timestamp_ms = 1000;
-    const auto person = makePersonCluster(2.0f, 0.0f);
+    const auto person = makePersonCluster(0.0f, 2.0f);
     radar.detections.insert(radar.detections.end(), person.begin(), person.end());
     radar_frame.radar = radar;
     check(fusion.process(radar_frame).tracks.size() == 1, "presence fixture creates a track");
@@ -311,9 +551,23 @@ void testRedMarkerDetector()
     RedMarkerDetector detector;
     const MarkerDetection left = detector.detect(view);
     check(left.valid, "red marker detector finds a red cluster");
-    check(left.bearing_rad > 0.03f, "left-of-axis marker has positive bearing");
+    check(left.bearing_rad < -0.03f, "left-of-axis marker has negative bearing");
     check(left.confidence >= 0.35f, "red marker confidence is usable");
     check(left.pixel_count >= 24, "red marker cluster is large enough");
+
+    std::vector<uint8_t> right_image(static_cast<std::size_t>(width * height * 3), 24);
+    for (int y = 14; y < 34; ++y)
+    {
+        for (int x = 44; x < 58; ++x)
+        {
+            uint8_t* pixel = right_image.data() + static_cast<std::size_t>(y * stride + x * 3);
+            pixel[0] = 220;
+            pixel[1] = 25;
+            pixel[2] = 28;
+        }
+    }
+    const MarkerDetection right = detector.detect({right_image.data(), width, height, stride});
+    check(right.valid && right.bearing_rad > 0.03f, "right-of-axis marker has positive bearing");
 
     std::vector<uint8_t> blank(static_cast<std::size_t>(width * height * 3), 24);
     RgbFrameView blank_view{blank.data(), width, height, stride};
@@ -377,6 +631,14 @@ void testWristVibratorOutput()
         content << file.rdbuf();
         return content.str();
     };
+    auto waitForFile = [&](const std::string& expected) {
+        for (int attempt = 0; attempt < 200; ++attempt)
+        {
+            if (readFile() == expected) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return false;
+    };
 
     WristConfig config;
     config.device_path = path;
@@ -386,14 +648,75 @@ void testWristVibratorOutput()
 
     vibrator.update(1000, true);
     check(vibrator.outputOn(), "wrist actuator reports active output");
-    check(readFile() == "1", "wrist writes active value while aimed");
+    check(waitForFile("1"), "wrist asynchronously writes active value while aimed");
 
     vibrator.update(1050, false);
     check(!vibrator.outputOn(), "wrist actuator reports inactive output");
-    check(readFile() == "0", "wrist writes inactive value when aim is lost");
+    check(waitForFile("0"), "wrist asynchronously writes inactive value when aim is lost");
 
     vibrator.stop();
     std::remove(path.c_str());
+}
+
+void testWristOrientationParserAndPointing()
+{
+    float yaw = 0.0f;
+    float pitch = 0.0f;
+    std::string error;
+    check(WristHaptics::parseOrientationLine("WRIST,45,-8", yaw, pitch, error),
+          "wrist bridge accepts yaw/pitch packets");
+    check(near(yaw, 45.0f, 1.0e-5f) && near(pitch, -8.0f, 1.0e-5f),
+          "wrist bridge preserves orientation values");
+    check(!WristHaptics::parseOrientationLine("WRIST,nan,0", yaw, pitch, error),
+          "wrist bridge rejects non-finite orientation");
+    check(!WristHaptics::parseOrientationLine("RADAR,0,0", yaw, pitch, error),
+          "wrist bridge rejects unrelated packet types");
+
+    WristHaptics guidance;
+    WorldModel world{};
+    world.timestamp_ms = 1000;
+    Track unknown{};
+    unknown.id = 1;
+    unknown.filter.reset({0.0f, 2.0f, 1.0f}, {}, 1000);
+    unknown.identity = {false, 0, 0.0f};
+    unknown.state = TrackState::VISIBLE;
+    unknown.visible = true;
+    world.tracks.push_back(unknown);
+
+    WristOrientation orientation{1000, 45.0f, 0.0f};
+    const WristHapticState dead_on = guidance.update(world, orientation, 1000);
+    check(dead_on.orientation_valid && dead_on.pointing &&
+              dead_on.pattern == WristHapticPattern::UNKNOWN_PERSON,
+          "startup calibration aligns the forward wrist direction with the target");
+    check(near(dead_on.wrist_yaw_deg, 0.0f, 1.0e-5f) &&
+              near(dead_on.frequency_hz, 20.0f, 1.0e-5f),
+          "dead-on unknown-person pointing produces the maximum pulse rate");
+
+    orientation.timestamp_ms = 1010;
+    orientation.wrist_yaw_deg = 60.0f;
+    const WristHapticState cone_edge = guidance.update(world, orientation, 1010);
+    check(cone_edge.pointing && near(cone_edge.frequency_hz, 4.0f, 1.0e-5f),
+          "pointing-cone edge produces the minimum 4 Hz pulse rate");
+
+    orientation.timestamp_ms = 1020;
+    orientation.wrist_yaw_deg = 70.0f;
+    const WristHapticState pointing_away = guidance.update(world, orientation, 1020);
+    check(!pointing_away.pointing && pointing_away.pattern == WristHapticPattern::SILENT &&
+              near(pointing_away.duty_pct, 0.0f, 1.0e-5f),
+          "pointing outside the cone keeps the wrist actuator silent");
+
+    world.tracks.front().identity.tagged_safe = true;
+    orientation.timestamp_ms = 1030;
+    orientation.wrist_yaw_deg = 45.0f;
+    const WristHapticState safe_target = guidance.update(world, orientation, 1030);
+    check(safe_target.pattern == WristHapticPattern::SAFE_TAGGED &&
+              safe_target.duty_pct < dead_on.duty_pct,
+          "safe-tagged pointing uses a distinct low-intensity cue");
+
+    orientation.timestamp_ms = 1040;
+    const WristHapticState collision = guidance.update(world, orientation, 1040, true);
+    check(collision.pattern == WristHapticPattern::COLLISION && collision.duty_pct == 100.0f,
+          "close-range collision warning overrides the pointing cone");
 }
 
 void testSensorSelection()
@@ -411,13 +734,30 @@ void testSensorSelection()
     check(!selection.has(SensorKind::Uwb), "radar preset disables UWB");
     check(sensorSelectionName(selection) == "radar", "radar keeps its preset name");
 
+    check(parseSensorSelection("lidar", selection, error), "lidar preset parses");
+    check(selection.has(SensorKind::Lidar) && selection.has(SensorKind::Imu),
+          "lidar preset enables LiDAR and IMU");
+    check(!selection.has(SensorKind::Radar), "lidar preset disables radar");
+    check(sensorSelectionName(selection) == "lidar", "lidar keeps its preset name");
+
+    check(parseSensorSelection("tof", selection, error), "tof preset parses");
+    check(selection.has(SensorKind::Tof) && selection.has(SensorKind::Imu),
+          "tof preset enables ToF and IMU");
+    check(!selection.has(SensorKind::Lidar), "tof preset disables LiDAR");
+    check(sensorSelectionName(selection) == "tof", "tof keeps its preset name");
+
+    check(parseSensorSelection("wallpad", selection, error), "wall-pad preset parses");
+    check(selection.has(SensorKind::Wallpad) && selection.has(SensorKind::Imu),
+          "wall-pad preset enables wall-pad presence and IMU");
+    check(sensorSelectionName(selection) == "wallpad", "wall-pad keeps its preset name");
+
     check(parseSensorSelection("imu,radar, UWB ,marker", selection, error), "custom sensor list parses");
     check(selection.has(SensorKind::Imu) && selection.has(SensorKind::Radar) &&
               selection.has(SensorKind::Uwb) && selection.has(SensorKind::Marker),
           "custom list enables each named sensor");
     check(sensorSelectionName(selection) == "imu+radar+uwb+marker", "custom list has a stable name");
 
-    check(!parseSensorSelection("lidar", selection, error), "unknown sensor is rejected");
+    check(!parseSensorSelection("unknown", selection, error), "unknown sensor is rejected");
     check(!parseSensorSelection("", selection, error), "empty sensor selection is rejected");
 
     SensorFrame frame;
@@ -427,7 +767,14 @@ void testSensorSelection()
     RadarFrame radar;
     radar.detections.push_back(makeDetection(2.0f, 0.0f));
     frame.radar = radar;
+    LidarScan lidar;
+    lidar.points.push_back({1.0f, 2.0f, 0.5f});
+    frame.lidar = lidar;
+    TofScan tof;
+    tof.rays.push_back({{0.0f, 0.0f, 0.0f}, {0.0f, 2.0f, 0.0f}});
+    frame.tof = tof;
     frame.uwb.push_back(UwbMeasurement{});
+    frame.wallpad_zones.push_back({1.0f, 3.0f, 0.0f, degToRad(50.0f), 0.7f});
     frame.ultrasonic = UltrasonicMeasurement{};
     frame.marker = MarkerObservation{};
 
@@ -439,9 +786,175 @@ void testSensorSelection()
     check(filtered.uwb.empty(), "filter drops unselected UWB");
     check(!filtered.ultrasonic.has_value(), "filter drops unselected ultrasonic");
     check(!filtered.marker.has_value(), "filter drops unselected marker");
+    check(!filtered.lidar.has_value(), "filter drops unselected LiDAR");
+    check(!filtered.tof.has_value(), "filter drops unselected ToF");
+    check(filtered.wallpad_zones.empty(), "filter drops unselected wall-pad sectors");
     check(filtered.frame_id == frame.frame_id && filtered.timestamp_ms == frame.timestamp_ms,
           "filter preserves frame id and timestamp");
     check(frame.uwb.size() == 1 && frame.marker.has_value(), "filter leaves the raw frame untouched");
+
+    SensorSelection wallpad_only;
+    check(parseSensorSelection("wallpad", wallpad_only, error), "wall-pad selection parses for filtering");
+    const SensorFrame wallpad_filtered = filterSensorFrame(frame, wallpad_only);
+    check(wallpad_filtered.wallpad_zones.size() == 1 && !wallpad_filtered.radar.has_value(),
+          "filter keeps wall-pad sectors and drops unselected radar");
+}
+
+void testLidarPointParser()
+{
+    Vec3 point{};
+    std::string error;
+    check(LidarDriver::parsePointLine("LIDAR,1.25,2.5", point, error),
+          "LiDAR parser accepts 2D bridge points");
+    check(near(point.x, 1.25f, 1.0e-5f) && near(point.y, 2.5f, 1.0e-5f) && near(point.z, 0.0f, 1.0e-5f),
+          "2D LiDAR records default height to zero");
+    check(LidarDriver::parsePointLine(" LIDAR, -1, 0.75, 1.5 ", point, error),
+          "LiDAR parser accepts 3D bridge points");
+    check(near(point.x, -1.0f, 1.0e-5f) && near(point.y, 0.75f, 1.0e-5f) &&
+              near(point.z, 1.5f, 1.0e-5f),
+          "3D LiDAR coordinates are preserved");
+    check(!LidarDriver::parsePointLine("LIDAR,nan,1", point, error),
+          "LiDAR parser rejects non-finite coordinates");
+    check(!LidarDriver::parsePointLine("RADAR,1,2", point, error),
+          "LiDAR parser rejects another sensor's record prefix");
+}
+
+void testWallpadZoneParser()
+{
+    PresenceZone zone{};
+    std::string error;
+    check(WallpadDriver::parseZoneLine("WALLPAD,1.2,3.8,25,40,0.8", 30.0f, zone, error),
+          "wall-pad parser accepts a valid sector bridge record");
+    check(near(zone.range_min, 1.2f, 1.0e-5f) &&
+              near(zone.range_max, 3.8f, 1.0e-5f) &&
+              near(zone.bearing_center_rad, degToRad(25.0f), 1.0e-5f) &&
+              near(zone.bearing_width_rad, degToRad(40.0f), 1.0e-5f) &&
+              near(zone.confidence, 0.8f, 1.0e-5f),
+          "wall-pad parser converts bridge fields into a PresenceZone");
+    check(!WallpadDriver::parseZoneLine("WALLPAD,1.2,31,0,45,0.8", 30.0f, zone, error),
+          "wall-pad parser rejects sectors beyond the configured range");
+    check(!WallpadDriver::parseZoneLine("WALLPAD,1.2,3.8,0,0,0.8", 30.0f, zone, error),
+          "wall-pad parser rejects invalid bearing widths");
+}
+
+void testLd19PacketParser()
+{
+    std::array<uint8_t, 47> packet{};
+    packet[0] = 0x54;
+    packet[1] = 0x2C;
+    for (std::size_t i = 0; i < 12; ++i)
+    {
+        packet[6 + i * 3] = 0xE8;
+        packet[7 + i * 3] = 0x03;
+    }
+    packet[46] = LidarDriver::crc8(packet.data(), packet.size() - 1);
+    std::vector<Vec3> points;
+    std::string error;
+    check(LidarDriver::parseLd19Packet(packet, points, error), "LD19 parser accepts a valid 47-byte packet");
+    check(points.size() == 12, "LD19 parser extracts all twelve distance samples");
+    if (!points.empty())
+        check(near(points.front().x, 0.0f, 1.0e-5f) && near(points.front().y, 1.0f, 1.0e-5f),
+              "LD19 zero-degree sample projects along +Y forward");
+    packet[4] = 0x28;
+    packet[5] = 0x23;
+    packet[42] = 0x28;
+    packet[43] = 0x23;
+    packet[46] = LidarDriver::crc8(packet.data(), packet.size() - 1);
+    check(LidarDriver::parseLd19Packet(packet, points, error), "LD19 parser accepts a valid leftward bearing");
+    if (!points.empty())
+        check(near(points.front().x, -1.0f, 1.0e-5f) && near(points.front().y, 0.0f, 1.0e-5f),
+              "LD19 counter-clockwise bearing projects toward -X left");
+    packet[46] ^= 0x01;
+    check(!LidarDriver::parseLd19Packet(packet, points, error), "LD19 parser rejects a CRC mismatch");
+}
+
+void testLidarBurstState()
+{
+    LidarConfig config;
+    config.power_gate_enabled = false;
+    LidarDriver lidar(config);
+    std::string error;
+    check(lidar.triggerScanBurst(1000), "LiDAR burst starts from an injected timestamp");
+    check(lidar.motorPowered() && lidar.isBurstActive(1000), "burst enables power and enters active state");
+    check(!lidar.triggerScanBurst(1100), "repeated scan trigger is ignored while active");
+
+    LidarScan scan;
+    const std::string point = "LIDAR,0,1\n";
+    check(!lidar.ingestBytes(reinterpret_cast<const uint8_t*>(point.data()), point.size(), 1299, scan, error),
+          "LiDAR points are discarded during the first 300 ms");
+    check(lidar.ingestBytes(reinterpret_cast<const uint8_t*>(point.data()), point.size(), 1300, scan, error),
+          "LiDAR points are accepted after the 300 ms spin-up window");
+    check(scan.points.size() == 1, "accepted burst data reaches the scan frame");
+    check(scan.burst_active, "LiDAR data frames identify the active burst");
+    check(!lidar.ingestBytes(nullptr, 0, 2500, scan, error), "burst ends at its deterministic deadline");
+    check(!lidar.motorPowered() && !lidar.isBurstActive(2500), "deadline automatically cuts scan power");
+}
+
+void testLidarOwnsMapping()
+{
+    SensorFrame frame;
+    frame.frame_id = 1;
+    frame.timestamp_ms = 1000;
+    RadarFrame radar;
+    radar.timestamp_ms = 1000;
+    Detection radar_return = makeDetection(3.0f, 3.0f, 0.2f);
+    radar.detections.push_back(radar_return);
+    frame.radar = radar;
+    LidarScan scan;
+    scan.timestamp_ms = 1000;
+    scan.points.push_back({0.0f, 2.0f, 0.0f});
+    frame.lidar = scan;
+
+    FusionEngine with_lidar;
+    const WorldModel lidar_world = with_lidar.process(frame);
+    int lidar_x = 0;
+    int lidar_y = 0;
+    int radar_x = 0;
+    int radar_y = 0;
+    check(lidar_world.health.lidar, "fresh LiDAR scan reports healthy");
+    check(lidar_world.occupancy.worldToCell(0.0f, 2.0f, lidar_x, lidar_y) &&
+              lidar_world.occupancy.probability(lidar_x, lidar_y) > 0.55f,
+          "LiDAR endpoint updates the primary map");
+    check(lidar_world.occupancy.worldToCell(3.0f, 3.0f, radar_x, radar_y) &&
+              near(lidar_world.occupancy.probability(radar_x, radar_y), 0.5f, 1.0e-4f),
+          "healthy LiDAR prevents radar returns from entering the map");
+
+    FusionEngine radar_fallback;
+    frame.lidar.reset();
+    const WorldModel fallback_world = radar_fallback.process(frame);
+    check(!fallback_world.health.lidar, "missing LiDAR reports unhealthy");
+    check(fallback_world.occupancy.worldToCell(3.0f, 3.0f, radar_x, radar_y) &&
+              fallback_world.occupancy.probability(radar_x, radar_y) > 0.55f,
+          "radar rays map only when LiDAR health is false");
+}
+
+void testTofOwnsMapping()
+{
+    SensorFrame frame;
+    frame.frame_id = 1;
+    frame.timestamp_ms = 1000;
+    RadarFrame radar;
+    radar.timestamp_ms = 1000;
+    radar.detections.push_back(makeDetection(3.0f, 3.0f, 0.2f));
+    frame.radar = radar;
+    TofScan tof;
+    tof.timestamp_ms = 1000;
+    tof.rays.push_back({{-0.05f, 0.0f, 0.0f}, {-0.05f, 2.0f, 0.0f}});
+    frame.tof = tof;
+
+    FusionEngine fusion;
+    const WorldModel world = fusion.process(frame);
+    int tof_x = 0;
+    int tof_y = 0;
+    int radar_x = 0;
+    int radar_y = 0;
+    check(world.health.tof, "fresh ToF data reports healthy");
+    check(world.occupancy.worldToCell(-0.05f, 2.0f, tof_x, tof_y) &&
+              world.occupancy.probability(tof_x, tof_y) > 0.55f,
+          "ToF rays update the continuous surface map");
+    check(world.occupancy.worldToCell(3.0f, 3.0f, radar_x, radar_y) &&
+              near(world.occupancy.probability(radar_x, radar_y), 0.5f, 1.0e-4f),
+          "healthy ToF mapping suppresses noisy radar fallback while LiDAR is off");
 }
 
 Track makeTestTrack(uint32_t id, float x, float y, PersonClass cls, bool visible = true)
@@ -470,32 +983,32 @@ void testAnnouncements()
     check(buildAnnouncement(world, config) == "Area clear.", "empty world announces clear");
 
     world.zones.push_back(PresenceZone{1.0f, 2.0f, 0.0f, 0.3f, 0.8f});
-    check(buildAnnouncement(world, config) == "Presence detected, no tracked people.",
+    check(buildAnnouncement(world, config) == "PRESENCE_ONLY detected; no person track.",
           "presence without a track is announced honestly");
     world.zones.clear();
 
-    world.tracks.push_back(makeTestTrack(1, 5.0f, 0.0f, PersonClass::UNKNOWN_PERSON));
-    check(buildAnnouncement(world, config) == "Unit 5 meters ahead.",
+    world.tracks.push_back(makeTestTrack(1, 0.0f, 5.0f, PersonClass::UNKNOWN_PERSON));
+    check(buildAnnouncement(world, config) == "UNKNOWN_PERSON 5 meters ahead.",
           "single unknown announces type, distance and bearing");
 
     world.tracks.clear();
-    world.tracks.push_back(makeTestTrack(1, 1.0f, -1.2f, PersonClass::SAFE_TAGGED));
-    check(buildAnnouncement(world, config) == "Friendly 2 meters to the right.",
+    world.tracks.push_back(makeTestTrack(1, 1.2f, 1.0f, PersonClass::SAFE_TAGGED));
+    check(buildAnnouncement(world, config) == "SAFE_TAGGED 2 meters to the right.",
           "tagged friendly is announced with side");
 
     world.tracks.clear();
-    world.tracks.push_back(makeTestTrack(1, 5.0f, 0.0f, PersonClass::UNKNOWN_PERSON));
-    world.tracks.push_back(makeTestTrack(2, -1.0f, 0.0f, PersonClass::SAFE_TAGGED));
+    world.tracks.push_back(makeTestTrack(1, 0.0f, 5.0f, PersonClass::UNKNOWN_PERSON));
+    world.tracks.push_back(makeTestTrack(2, 0.0f, -1.0f, PersonClass::SAFE_TAGGED));
     const std::string summary = buildAnnouncement(world, config);
     check(summary.find("2 people:") != std::string::npos, "multiple people announce a count");
-    check(summary.find("1 unit") != std::string::npos, "multiple people count units");
-    check(summary.find("1 friendly") != std::string::npos, "multiple people count friendlies");
-    check(summary.find("Friendly 1 meter behind.") != std::string::npos,
+    check(summary.find("1 UNKNOWN_PERSON") != std::string::npos, "multiple people count unknown tracks");
+    check(summary.find("1 SAFE_TAGGED") != std::string::npos, "multiple people count safe-tagged tracks");
+    check(summary.find("SAFE_TAGGED 1 meter behind.") != std::string::npos,
           "nearest person is announced first with side");
 
     // A marker or static map object must never be spoken as a person.
     WorldModel marker_world{};
-    marker_world.static_objects.push_back(MapObject{{2.0f, 0.0f, 0.0f}, 0.9f});
+    marker_world.static_objects.push_back(MapObject{{0.0f, 2.0f, 0.0f}, 0.9f});
     check(buildAnnouncement(marker_world, config) == "Area clear.",
           "map objects are never announced as people");
 
@@ -512,10 +1025,10 @@ void testAnnouncements()
     check(announcer.start(error), "announcer opens its output: " + error);
 
     WorldModel scene{};
-    scene.tracks.push_back(makeTestTrack(1, 2.0f, 0.0f, PersonClass::UNKNOWN_PERSON));
+    scene.tracks.push_back(makeTestTrack(1, 0.0f, 2.0f, PersonClass::UNKNOWN_PERSON));
     scene.timestamp_ms = 1000;
     announcer.update(scene, 1000);
-    check(announcer.lastText() == "Unit 2 meters ahead.", "announcer composes the expected line");
+    check(announcer.lastText() == "UNKNOWN_PERSON 2 meters ahead.", "announcer composes the expected line");
 
     const auto sayCount = [&]() {
         std::ifstream file(path, std::ios::binary);
@@ -531,24 +1044,32 @@ void testAnnouncements()
         }
         return count;
     };
+    const auto waitForSayCount = [&](std::size_t expected) {
+        for (int attempt = 0; attempt < 200; ++attempt)
+        {
+            if (sayCount() == expected) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return false;
+    };
 
-    check(sayCount() == 1, "announcer writes one SAY line");
+    check(waitForSayCount(1), "announcer asynchronously writes one SAY line");
     announcer.update(scene, 1500);
     check(sayCount() == 1, "announcer debounces an unchanged scene");
     announcer.update(scene, 4000);
-    check(sayCount() == 2, "announcer repeats an unchanged scene after the repeat interval");
+    check(waitForSayCount(2), "announcer repeats an unchanged scene after the repeat interval");
 
     scene.tracks.clear();
-    scene.tracks.push_back(makeTestTrack(2, 3.0f, 0.0f, PersonClass::UNKNOWN_PERSON));
+    scene.tracks.push_back(makeTestTrack(2, 0.0f, 3.0f, PersonClass::UNKNOWN_PERSON));
     announcer.update(scene, 4300);
     check(sayCount() == 2, "announcer debounces a changed scene");
     announcer.update(scene, 5100);
-    check(sayCount() == 3, "announcer speaks a changed scene after the debounce");
+    check(waitForSayCount(3), "announcer speaks a changed scene after the debounce");
 
-    announcer.announceText("Red marker detected 10 degrees to the left.", 5200);
+    announcer.announceText("Red marker detected 10 degrees to the right.", 5200);
     check(sayCount() == 3, "custom alerts use the announcer change debounce");
-    announcer.announceText("Red marker detected 10 degrees to the left.", 6100);
-    check(sayCount() == 4 && announcer.lastText() == "Red marker detected 10 degrees to the left.",
+    announcer.announceText("Red marker detected 10 degrees to the right.", 6100);
+    check(waitForSayCount(4) && announcer.lastText() == "Red marker detected 10 degrees to the right.",
           "announcer emits a debounced custom alert");
 
     announcer.stop();
@@ -683,6 +1204,275 @@ void testSchematicRecordingReplay()
     std::remove(path.c_str());
 }
 
+void testLidarRecordingReplay()
+{
+    const std::string path = "sa_test_lidar_session.bin";
+    std::remove(path.c_str());
+
+    Recorder recorder;
+    std::string error;
+    check(recorder.open(path, error), "LiDAR session opens for recording: " + error);
+    SensorFrame frame;
+    frame.frame_id = 1;
+    frame.timestamp_ms = 1400;
+    LidarScan scan;
+    scan.timestamp_ms = 1395;
+    scan.origin = {0.1f, 0.2f, 0.3f};
+    scan.points = {{1.0f, 2.0f, 0.0f}, {-0.5f, 3.0f, 1.2f}};
+    scan.burst_active = true;
+    frame.lidar = scan;
+    check(recorder.recordFrame(frame), "LiDAR scan records");
+    SensorFrame completion_frame;
+    completion_frame.frame_id = 2;
+    completion_frame.timestamp_ms = 1500;
+    LidarScan completion;
+    completion.timestamp_ms = 1500;
+    completion.burst_complete = true;
+    completion_frame.lidar = completion;
+    check(recorder.recordFrame(completion_frame), "LiDAR burst-completion event records");
+    recorder.close();
+
+    Playback playback;
+    check(playback.open(path, error), "LiDAR session opens for replay: " + error);
+    PlaybackFrame replay;
+    check(playback.next(replay), "LiDAR replay frame arrives");
+    check(replay.sensors.lidar.has_value(), "recorded LiDAR scan is restored");
+    if (replay.sensors.lidar)
+    {
+        check(replay.sensors.lidar->timestamp_ms == scan.timestamp_ms &&
+                  replay.sensors.lidar->points.size() == scan.points.size(),
+              "LiDAR replay preserves timestamp and point count");
+        check(near(replay.sensors.lidar->origin.x, scan.origin.x, 1.0e-5f) &&
+                  near(replay.sensors.lidar->points[1].z, scan.points[1].z, 1.0e-5f),
+              "LiDAR replay preserves origin and point coordinates");
+        check(replay.sensors.lidar->burst_active, "LiDAR replay preserves active-burst state");
+    }
+    check(playback.next(replay) && replay.sensors.lidar && replay.sensors.lidar->burst_complete,
+          "LiDAR replay preserves the burst-completion event");
+
+    playback.close();
+    std::remove(path.c_str());
+}
+
+void testTofRecordingReplay()
+{
+    const std::string path = "sa_test_tof_session.bin";
+    std::remove(path.c_str());
+
+    SensorFrame frame;
+    frame.frame_id = 1;
+    frame.timestamp_ms = 1500;
+    TofScan scan;
+    scan.timestamp_ms = 1495;
+    scan.rays.push_back({{0.1f, 0.0f, 0.2f}, {0.4f, 1.8f, 0.7f}});
+    frame.tof = scan;
+    UwbMeasurement anchor;
+    anchor.timestamp_ms = 1490;
+    anchor.tag_id = 19;
+    anchor.range_m = 2.2f;
+    anchor.confidence = 0.85f;
+    anchor.is_fixed_anchor = true;
+    anchor.anchor_x_m = -2.0f;
+    anchor.anchor_y_m = 3.0f;
+    frame.uwb.push_back(anchor);
+
+    FusionEngine direct_fusion;
+    const WorldModel direct_world = direct_fusion.process(frame);
+    Recorder recorder;
+    std::string error;
+    check(recorder.open(path, error), "ToF session opens for recording: " + error);
+    check(recorder.recordFrame(frame, &direct_world), "ToF scan and world snapshot record");
+    recorder.close();
+
+    Playback playback;
+    check(playback.open(path, error), "ToF session opens for replay: " + error);
+    PlaybackFrame replay;
+    check(playback.next(replay), "ToF replay frame arrives");
+    check(replay.sensors.tof.has_value(), "recorded ToF scan is restored");
+    if (replay.sensors.tof)
+    {
+        check(replay.sensors.tof->timestamp_ms == scan.timestamp_ms &&
+                  replay.sensors.tof->rays.size() == scan.rays.size(),
+              "ToF replay preserves timestamp and ray count");
+        check(near(replay.sensors.tof->rays.front().endpoint.z, scan.rays.front().endpoint.z, 1.0e-5f),
+              "ToF replay preserves 3D endpoint coordinates");
+    }
+    check(replay.sensors.uwb.size() == 1 && replay.sensors.uwb.front().is_fixed_anchor &&
+              near(replay.sensors.uwb.front().anchor_x_m, anchor.anchor_x_m, 1.0e-5f) &&
+              near(replay.sensors.uwb.front().anchor_y_m, anchor.anchor_y_m, 1.0e-5f),
+          "replay preserves the fixed-anchor flag and known map coordinates");
+    FusionEngine replay_fusion;
+    const WorldModel replay_world = replay_fusion.process(replay.sensors);
+    check(gridHash(direct_world) == gridHash(replay_world), "ToF replay regenerates the same occupancy map");
+    playback.close();
+    std::remove(path.c_str());
+}
+
+void testWallpadRecordingReplay()
+{
+    const std::string path = "sa_test_wallpad_session.bin";
+    std::remove(path.c_str());
+
+    SensorFrame frame;
+    frame.frame_id = 4;
+    frame.timestamp_ms = 2700;
+    frame.wallpad_zones.push_back({1.1f, 4.2f, degToRad(-30.0f), degToRad(55.0f), 0.73f});
+    FusionEngine fusion;
+    const WorldModel direct_world = fusion.process(frame);
+
+    RecorderConfig recorder_config;
+    recorder_config.write_world_snapshots = false;
+    recorder_config.write_track_snapshots = false;
+    Recorder recorder(recorder_config);
+    std::string error;
+    check(recorder.open(path, error), "wall-pad session opens for recording: " + error);
+    check(recorder.recordFrame(frame, &direct_world), "wall-pad sector is recorded as a replay input");
+    recorder.close();
+
+    Playback playback;
+    check(playback.open(path, error), "wall-pad session opens for replay: " + error);
+    PlaybackFrame replay;
+    check(playback.next(replay), "wall-pad replay frame arrives");
+    check(replay.sensors.timestamp_ms == frame.timestamp_ms &&
+              replay.sensors.wallpad_zones.size() == 1,
+          "wall-pad replay preserves frame timestamp and sector count");
+    if (!replay.sensors.wallpad_zones.empty())
+    {
+        const PresenceZone& zone = replay.sensors.wallpad_zones.front();
+        check(near(zone.range_min, 1.1f, 1.0e-5f) &&
+                  near(zone.range_max, 4.2f, 1.0e-5f) &&
+                  near(zone.bearing_center_rad, degToRad(-30.0f), 1.0e-5f) &&
+                  near(zone.bearing_width_rad, degToRad(55.0f), 1.0e-5f) &&
+                  near(zone.confidence, 0.73f, 1.0e-5f),
+              "wall-pad replay preserves sector geometry and confidence");
+    }
+    FusionEngine replay_fusion;
+    const WorldModel replay_world = replay_fusion.process(replay.sensors);
+    check(replay_world.zones.size() == direct_world.zones.size(),
+          "replay regenerates the wall-pad presence zone");
+    playback.close();
+    std::remove(path.c_str());
+}
+
+void testWristOrientationRecordingReplay()
+{
+    const std::string path = "sa_test_wrist_orientation_session.bin";
+    std::remove(path.c_str());
+
+    SensorFrame frame;
+    frame.frame_id = 5;
+    frame.timestamp_ms = 2800;
+    frame.wrist_orientation = WristOrientation{2795, 37.5f, -12.0f};
+    RecorderConfig recorder_config;
+    recorder_config.write_world_snapshots = false;
+    recorder_config.write_track_snapshots = false;
+    Recorder recorder(recorder_config);
+    std::string error;
+    check(recorder.open(path, error), "wrist session opens for recording: " + error);
+    check(recorder.recordFrame(frame), "wrist orientation is recorded as a replay input");
+    recorder.close();
+
+    Playback playback;
+    check(playback.open(path, error), "wrist session opens for replay: " + error);
+    PlaybackFrame replay;
+    check(playback.next(replay) && replay.sensors.wrist_orientation.has_value(),
+          "wrist orientation replay record arrives");
+    if (replay.sensors.wrist_orientation)
+    {
+        const WristOrientation& orientation = *replay.sensors.wrist_orientation;
+        check(orientation.timestamp_ms == 2795 &&
+                  near(orientation.wrist_yaw_deg, 37.5f, 1.0e-5f) &&
+                  near(orientation.wrist_pitch_deg, -12.0f, 1.0e-5f),
+              "wrist orientation replay preserves timestamp, yaw, and pitch");
+    }
+    playback.close();
+    std::remove(path.c_str());
+}
+
+void testLegacySessionRejected()
+{
+    const std::string path = "sa_test_v1_session.bin";
+    std::remove(path.c_str());
+
+    Recorder recorder;
+    std::string error;
+    check(recorder.open(path, error), "legacy-version fixture is created: " + error);
+    recorder.close();
+
+    std::fstream file(path, std::ios::binary | std::ios::in | std::ios::out);
+    file.seekp(8, std::ios::beg);
+    const char version_v1[4] = {1, 0, 0, 0};
+    file.write(version_v1, sizeof(version_v1));
+    file.close();
+
+    Playback playback;
+    check(!playback.open(path, error), "v1 sessions are rejected");
+    check(error.find("v1") != std::string::npos && error.find("legacy coordinate frame") != std::string::npos,
+          "v1 rejection explains the coordinate-frame incompatibility");
+    playback.close();
+
+    std::fstream version2_file(path, std::ios::binary | std::ios::in | std::ios::out);
+    version2_file.seekp(8, std::ios::beg);
+    const char version_v2[4] = {2, 0, 0, 0};
+    version2_file.write(version_v2, sizeof(version_v2));
+    version2_file.close();
+    check(!playback.open(path, error), "v2 sessions are rejected after LiDAR format changes");
+    check(error.find("v2") != std::string::npos && error.find("LiDAR records") != std::string::npos,
+          "v2 rejection explains the LiDAR format incompatibility");
+    playback.close();
+
+    std::fstream version3_file(path, std::ios::binary | std::ios::in | std::ios::out);
+    version3_file.seekp(8, std::ios::beg);
+    const char version_v3[4] = {3, 0, 0, 0};
+    version3_file.write(version_v3, sizeof(version_v3));
+    version3_file.close();
+    check(!playback.open(path, error), "v3 sessions are rejected after ToF records are added");
+    check(error.find("v3") != std::string::npos && error.find("ToF records") != std::string::npos,
+          "v3 rejection explains the ToF format incompatibility");
+    playback.close();
+
+    std::fstream version4_file(path, std::ios::binary | std::ios::in | std::ios::out);
+    version4_file.seekp(8, std::ios::beg);
+    const char version_v4[4] = {4, 0, 0, 0};
+    version4_file.write(version_v4, sizeof(version_v4));
+    version4_file.close();
+    check(!playback.open(path, error), "v4 sessions are rejected after burst and anchor fields are added");
+    check(error.find("v4") != std::string::npos && error.find("fixed-anchor fields") != std::string::npos,
+          "v4 rejection explains the localization record incompatibility");
+    playback.close();
+
+    std::fstream version5_file(path, std::ios::binary | std::ios::in | std::ios::out);
+    version5_file.seekp(8, std::ios::beg);
+    const char version_v5[4] = {5, 0, 0, 0};
+    version5_file.write(version_v5, sizeof(version_v5));
+    version5_file.close();
+    check(!playback.open(path, error), "v5 sessions are rejected after the occupancy-grid expansion");
+    check(error.find("v5") != std::string::npos && error.find("occupancy-grid") != std::string::npos,
+          "v5 rejection explains the map-profile incompatibility");
+    playback.close();
+
+    std::fstream version6_file(path, std::ios::binary | std::ios::in | std::ios::out);
+    version6_file.seekp(8, std::ios::beg);
+    const char version_v6[4] = {6, 0, 0, 0};
+    version6_file.write(version_v6, sizeof(version_v6));
+    version6_file.close();
+    check(!playback.open(path, error), "v6 sessions are rejected after wall-pad input is added");
+    check(error.find("v6") != std::string::npos && error.find("wall-pad") != std::string::npos,
+          "v6 rejection explains the new raw input record");
+    playback.close();
+
+    std::fstream version7_file(path, std::ios::binary | std::ios::in | std::ios::out);
+    version7_file.seekp(8, std::ios::beg);
+    const char version_v7[4] = {7, 0, 0, 0};
+    version7_file.write(version_v7, sizeof(version_v7));
+    version7_file.close();
+    check(!playback.open(path, error), "v7 sessions are rejected after wrist orientation is recorded");
+    check(error.find("v7") != std::string::npos && error.find("wrist orientation") != std::string::npos,
+          "v7 rejection explains the new wrist input record");
+    playback.close();
+    std::remove(path.c_str());
+}
+
 bool sameWorld(const WorldModel& a, const WorldModel& b)
 {
     if (a.timestamp_ms != b.timestamp_ms) return false;
@@ -782,21 +1572,40 @@ void testSimulationDeterminismAndReplay()
 int main()
 {
     testOccupancyGrid();
+    testRearRadarRotation();
     testKalmanTrack();
     testTrackManagerIdentityPersistence();
     testPresenceSupportRules();
+    testWallpadPresenceRules();
     testUwbOnlyCreatesNoTracks();
     testNoveldaOnlyCreatesNoTracks();
+    testImuStationaryZupt();
+    testCorrelativeTofScanMatching();
+    testLongRangeScanMatching();
+    testBurstLoopClosure();
+    testUwbAnchorCorrection();
     testUwbAssociation();
     testPresenceFusionNeedsOverlap();
     testRedMarkerDetector();
     testWristGuidanceHysteresis();
     testWristVibratorOutput();
+    testWristOrientationParserAndPointing();
     testSensorSelection();
+    testLidarPointParser();
+    testWallpadZoneParser();
+    testLd19PacketParser();
+    testLidarBurstState();
+    testLidarOwnsMapping();
+    testTofOwnsMapping();
     testAnnouncements();
     testSchematic();
     testSchematicFusion();
     testSchematicRecordingReplay();
+    testLidarRecordingReplay();
+    testTofRecordingReplay();
+    testWallpadRecordingReplay();
+    testWristOrientationRecordingReplay();
+    testLegacySessionRejected();
     testSimulationDeterminismAndReplay();
 
     if (g_failures != 0)

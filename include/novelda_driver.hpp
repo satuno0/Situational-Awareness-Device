@@ -12,6 +12,7 @@ struct NoveldaConfig
 {
     // Firmware bridge line protocol:
     //   NOV,range_m,motion,breathing,confidence[,bearing_deg,bearing_width_deg[,through_barrier]]
+    // Bearings are relative to +Y forward and positive toward +X right.
     // The XeThru module itself is not a primary tracker. It only produces
     // presence evidence for this device.
     std::string port;

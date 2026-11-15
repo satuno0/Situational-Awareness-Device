@@ -3,11 +3,15 @@
 #include "types.hpp"
 
 #include <cstddef>
+#include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <fstream>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 
 namespace sa {
 
@@ -60,10 +64,16 @@ private:
     struct SpeechBackend;
 
     void emit(const std::string& text, uint64_t now_ms);
+    void deviceLoop();
 
     AnnounceConfig config_;
     std::unique_ptr<SpeechBackend> speech_;
     std::ofstream device_;
+    std::mutex device_mutex_;
+    std::condition_variable device_ready_;
+    std::deque<std::string> device_queue_;
+    std::thread device_thread_;
+    bool stop_device_thread_ = false;
     bool running_ = false;
     std::optional<uint64_t> last_emit_ms_;
     std::string last_text_;

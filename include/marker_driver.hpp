@@ -13,7 +13,7 @@ struct MarkerConfig
     // result per line. Two formats are accepted:
     //   MARK,<bearing_deg>,<confidence>[,<area_ratio>]
     //   RED,<cx_px>,<cy_px>,<width_px>,<height_px>,<confidence>[,<hfov_deg>]
-    // MARK bearing is positive to the left of the camera axis. RED carries a
+    // MARK bearing is positive to the right of the camera axis. RED carries a
     // red-cluster centroid and is converted to the same bearing.
     std::string port;
     int baud_rate = 115200;

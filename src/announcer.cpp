@@ -29,26 +29,20 @@ std::string distancePhrase(float range_m)
     return std::to_string(meters) + (meters == 1 ? " meter" : " meters");
 }
 
-// Positive bearing is left of the device forward axis.
+// Positive bearing is right of the device forward axis.
 std::string directionPhrase(float bearing_deg)
 {
     const float magnitude = std::abs(bearing_deg);
     if (magnitude <= 22.5f) return "ahead";
-    if (magnitude <= 67.5f) return bearing_deg > 0.0f ? "to the left" : "to the right";
-    if (magnitude <= 112.5f) return bearing_deg > 0.0f ? "on the left" : "on the right";
-    if (magnitude <= 157.5f) return bearing_deg > 0.0f ? "behind and to the left" : "behind and to the right";
+    if (magnitude <= 67.5f) return bearing_deg > 0.0f ? "to the right" : "to the left";
+    if (magnitude <= 112.5f) return bearing_deg > 0.0f ? "on the right" : "on the left";
+    if (magnitude <= 157.5f) return bearing_deg > 0.0f ? "behind and to the right" : "behind and to the left";
     return "behind";
 }
 
 const char* classLabel(PersonClass cls)
 {
-    switch (cls)
-    {
-    case PersonClass::SAFE_TAGGED: return "Friendly";
-    case PersonClass::PRESENCE_ONLY: return "Presence";
-    case PersonClass::UNKNOWN_PERSON: break;
-    }
-    return "Unit";
+    return personClassName(cls);
 }
 
 struct Entry
@@ -138,7 +132,7 @@ std::string buildAnnouncement(const WorldModel& world, const AnnounceConfig& con
 
         Entry entry;
         entry.range_m = range;
-        entry.bearing_deg = radToDeg(std::atan2(body.y, body.x));
+        entry.bearing_deg = radToDeg(std::atan2(body.x, body.y));
         entry.cls = classifyTrack(track);
         entry.id = track.id;
         entries.push_back(entry);
@@ -151,18 +145,18 @@ std::string buildAnnouncement(const WorldModel& world, const AnnounceConfig& con
 
     if (entries.empty())
     {
-        if (!world.zones.empty()) return "Presence detected, no tracked people.";
+        if (!world.zones.empty()) return "PRESENCE_ONLY detected; no person track.";
         return "Area clear.";
     }
 
-    int units = 0;
-    int friendlies = 0;
-    int presence = 0;
+    int unknown_people = 0;
+    int safe_tagged = 0;
+    int presence_only = 0;
     for (const auto& entry : entries)
     {
-        if (entry.cls == PersonClass::SAFE_TAGGED) ++friendlies;
-        else if (entry.cls == PersonClass::PRESENCE_ONLY) ++presence;
-        else ++units;
+        if (entry.cls == PersonClass::SAFE_TAGGED) ++safe_tagged;
+        else if (entry.cls == PersonClass::PRESENCE_ONLY) ++presence_only;
+        else ++unknown_people;
     }
 
     std::ostringstream out;
@@ -182,9 +176,9 @@ std::string buildAnnouncement(const WorldModel& world, const AnnounceConfig& con
         out << (first ? " " : ", ") << countPhrase(count, singular, plural);
         first = false;
     };
-    appendCount(units, "unit", "units");
-    appendCount(friendlies, "friendly", "friendlies");
-    appendCount(presence, "presence", "presence contacts");
+    appendCount(unknown_people, "UNKNOWN_PERSON", "UNKNOWN_PERSON");
+    appendCount(safe_tagged, "SAFE_TAGGED", "SAFE_TAGGED");
+    appendCount(presence_only, "PRESENCE_ONLY", "PRESENCE_ONLY");
     out << ".";
 
     const std::size_t limit = std::min(entries.size(), std::max<std::size_t>(1, config.max_entries));
@@ -227,22 +221,64 @@ bool Announcer::start(std::string& error)
     running_ = true;
     last_emit_ms_.reset();
     last_text_.clear();
+    if (device_.is_open())
+    {
+        {
+            std::lock_guard<std::mutex> lock(device_mutex_);
+            device_queue_.clear();
+            stop_device_thread_ = false;
+        }
+        device_thread_ = std::thread(&Announcer::deviceLoop, this);
+    }
     return true;
 }
 
 void Announcer::stop()
 {
+    running_ = false;
+    if (device_thread_.joinable())
+    {
+        {
+            std::lock_guard<std::mutex> lock(device_mutex_);
+            stop_device_thread_ = true;
+        }
+        device_ready_.notify_one();
+        device_thread_.join();
+    }
     if (device_.is_open()) device_.close();
     speech_.reset();
-    running_ = false;
+    std::lock_guard<std::mutex> lock(device_mutex_);
+    device_queue_.clear();
+    stop_device_thread_ = false;
+}
+
+void Announcer::deviceLoop()
+{
+    while (true)
+    {
+        std::string line;
+        {
+            std::unique_lock<std::mutex> lock(device_mutex_);
+            device_ready_.wait(lock, [this] { return !device_queue_.empty() || stop_device_thread_; });
+            if (device_queue_.empty() && stop_device_thread_) return;
+            line = std::move(device_queue_.front());
+            device_queue_.pop_front();
+        }
+        device_ << line << "\n";
+        device_.flush();
+        if (!device_) std::cerr << "[announce] failed to write speaker bridge output\n";
+    }
 }
 
 void Announcer::emit(const std::string& text, uint64_t now_ms)
 {
     if (device_.is_open())
     {
-        device_ << "SAY " << text << "\n";
-        device_.flush();
+        {
+            std::lock_guard<std::mutex> lock(device_mutex_);
+            device_queue_.push_back("SAY " + text);
+        }
+        device_ready_.notify_one();
     }
     if (speech_)
     {

@@ -22,14 +22,15 @@ struct MapObject
 struct GridConfig
 {
     float cell_size = 0.25f;
-    int width = 160;
-    int height = 160;
-    float range_m = 20.0f;
+    int width = 280;
+    int height = 280;
+    float range_m = 35.0f;
 };
 
-// Bayesian 2-D occupancy grid. World +x is forward and +y is left. The grid is
-// centered on the origin and spans [-range_m, +range_m] on both axes when the
-// default 160 x 160 / 0.25 m configuration is used.
+// Bayesian 2-D occupancy grid in a right-handed world frame: +X is right and
+// +Y is forward. The grid is centered on the origin and spans [-range_m,
+// +range_m] on both axes when the default 280 x 280 / 0.25 m configuration is
+// used.
 class OccupancyGrid
 {
 public:
@@ -50,7 +51,7 @@ public:
                       const Vec3& endpoint,
                       float occupied_log_odds = 0.85f,
                       float free_log_odds = -0.35f,
-                      float max_range_m = 20.0f);
+                      float max_range_m = 35.0f);
 
     void markOccupiedWorld(const Vec3& position, float log_odds = 0.85f);
     void markFreeWorld(const Vec3& position, float log_odds = -0.35f);

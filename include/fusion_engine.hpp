@@ -27,10 +27,9 @@ struct FusionConfig
     float tag_bearing_sigma_rad = 0.20f;
     float tag_velocity_sigma_mps = 0.60f;
 
-    // Radar point clouds contain far more static structure than people. Only
-    // compact clusters at torso height are offered to the track manager; the
-    // full cloud still feeds the occupancy map. This prevents wall returns
-    // from becoming "people" and from excluding every map cell.
+    // Only compact radar clusters at torso height are offered to the track
+    // manager. LiDAR owns surface mapping; radar rays are a fallback only when
+    // LiDAR health is false.
     float spawn_cluster_radius_m = 0.36f;
     std::size_t spawn_max_cluster_points = 6;
     std::size_t spawn_min_cluster_points = 2;
@@ -90,8 +89,13 @@ private:
     std::vector<Detection> radarToWorld(const RadarFrame& radar) const;
     std::vector<Detection> selectPersonCandidates(const std::vector<Detection>& world_detections) const;
     void updateUwb(const std::vector<UwbMeasurement>& measurements, uint64_t now_ms);
-    void updatePresence(const std::vector<NoveldaMeasurement>& measurements, uint64_t now_ms);
-    void updateMap(const std::vector<Detection>& world_detections, uint64_t now_ms);
+    void updatePresence(const std::vector<NoveldaMeasurement>& measurements,
+                        const std::vector<PresenceZone>& wallpad_zones,
+                        uint64_t now_ms);
+    void updateMap(const LidarScan* lidar_scan,
+                   const TofScan* tof_scan,
+                   const std::vector<Detection>& radar_detections,
+                   uint64_t now_ms);
     void updateStaticObjects(const std::vector<Track>& tracks);
 
     FusionConfig config_;
@@ -99,11 +103,13 @@ private:
     SlamManager slam_;
     OccupancyGrid occupancy_;
     ConfidenceEngine confidence_;
-    SensorHealth health_{false, false, false, false, false, 0.0f};
+    SensorHealth health_{false, false, false, false, false, false, 0.0f};
     Schematic schematic_;
 
     std::optional<uint64_t> last_imu_ms_;
     std::optional<uint64_t> last_radar_ms_;
+    std::optional<uint64_t> last_lidar_ms_;
+    std::optional<uint64_t> last_tof_ms_;
     std::optional<uint64_t> last_uwb_ms_;
     std::optional<uint64_t> last_novelda_ms_;
     std::optional<uint64_t> last_ultrasonic_ms_;

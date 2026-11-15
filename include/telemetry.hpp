@@ -14,7 +14,7 @@ namespace sa {
 struct TelemetryConfig
 {
     std::string bind_address = "127.0.0.1";
-    uint16_t port = 8080;
+    uint16_t port = 8765;
     std::string web_root = "web";
     bool enabled = true;
     std::string sensor_mode = "mixed";
@@ -48,11 +48,14 @@ public:
     void publish(const WorldModel& world,
                  const std::optional<MarkerObservation>& marker = std::nullopt,
                  const WristTelemetry& wrist = WristTelemetry{},
-                 const std::string& announcement = {});
+                 const std::string& announcement = {},
+                 bool scan_available = false,
+                 bool scan_active = false);
 
     // Takes one pending POST /api/map body. Returns false when none is queued.
     // The caller parses and validates it before replacing the active schematic.
     bool takeMapUpload(std::string& text);
+    bool takeScanBurstCommand();
 
 private:
     void serverLoop();
@@ -60,7 +63,9 @@ private:
     void buildStateJson(const WorldModel& world,
                         const std::optional<MarkerObservation>& marker,
                         const WristTelemetry& wrist,
-                        const std::string& announcement);
+                        const std::string& announcement,
+                        bool scan_available,
+                        bool scan_active);
     void buildGridJson(const WorldModel& world);
     std::string response(const std::string& status,
                          const std::string& content_type,
@@ -83,6 +88,7 @@ private:
     std::optional<uint64_t> last_grid_timestamp_ms_;
     std::string pending_map_text_;
     bool has_map_upload_ = false;
+    bool scan_burst_command_pending_ = false;
 };
 
 } // namespace sa

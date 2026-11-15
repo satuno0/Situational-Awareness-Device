@@ -111,7 +111,7 @@ void MarkerDriver::parseLine(const std::string& line, MarkerObservation& observa
         float hfov_deg = config_.horizontal_fov_deg;
         if (fields.size() >= 7) (void)parseFloat(fields[6], hfov_deg);
         const float focal = (width * 0.5f) / std::tan(std::max(0.1f, degToRad(hfov_deg)) * 0.5f);
-        parsed.bearing_rad = std::atan2(-(cx - width * 0.5f), focal);
+        parsed.bearing_rad = std::atan2(cx - width * 0.5f, focal);
         parsed.confidence = clampf(confidence, 0.0f, 1.0f);
         parsed.area_ratio = clampf(100.0f / std::max(1.0f, width * height), 0.0f, 1.0f);
         parsed.valid = parsed.confidence > 0.0f;

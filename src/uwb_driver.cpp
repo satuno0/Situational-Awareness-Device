@@ -111,6 +111,21 @@ void UwbDriver::parseLine(const std::string& line, std::vector<UwbMeasurement>& 
             measurement.range_rate_mps = range_rate;
         }
     }
+    if (fields.size() >= 6)
+    {
+        if (fields[5] == "1" || fields[5] == "true")
+        {
+            if (fields.size() < 8 ||
+                !parseFloat(fields[6], measurement.anchor_x_m) ||
+                !parseFloat(fields[7], measurement.anchor_y_m))
+                return;
+            measurement.is_fixed_anchor = true;
+        }
+        else if (fields[5] != "0" && fields[5] != "false")
+        {
+            return;
+        }
+    }
     measurements.push_back(measurement);
 }
 

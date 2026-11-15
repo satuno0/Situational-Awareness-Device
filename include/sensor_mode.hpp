@@ -17,10 +17,13 @@ enum class SensorKind : uint32_t
     Uwb = 1u << 2,
     Novelda = 1u << 3,
     Ultrasonic = 1u << 4,
-    Marker = 1u << 5
+    Marker = 1u << 5,
+    Lidar = 1u << 6,
+    Tof = 1u << 7,
+    Wallpad = 1u << 8
 };
 
-constexpr uint32_t kAllSensorMask = (1u << 6) - 1u;
+constexpr uint32_t kAllSensorMask = (1u << 9) - 1u;
 
 struct SensorSelection
 {
@@ -29,7 +32,7 @@ struct SensorSelection
     bool has(SensorKind kind) const { return (mask & static_cast<uint32_t>(kind)) != 0; }
 };
 
-// Accepts either a preset (mixed, radar, uwb, novelda, ultrasonic, vision, imu)
+// Accepts either a preset (mixed, radar, lidar, tof, uwb, novelda, ultrasonic, vision, imu)
 // or an explicit comma/plus separated list (for example "radar,uwb,marker").
 // Presets keep the IMU enabled because it supplies ego-motion, not target data.
 bool parseSensorSelection(const std::string& text, SensorSelection& selection, std::string& error);

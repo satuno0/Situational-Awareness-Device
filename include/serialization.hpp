@@ -9,6 +9,8 @@
 
 namespace sa {
 
+constexpr uint32_t kSessionFormatVersion = 8;
+
 class BinaryWriter
 {
 public:
@@ -83,6 +85,10 @@ ImuSample readImu(BinaryReader& reader);
 
 void writeRadarFrame(BinaryWriter& writer, const RadarFrame& frame);
 RadarFrame readRadarFrame(BinaryReader& reader);
+void writeLidarScan(BinaryWriter& writer, const LidarScan& scan);
+LidarScan readLidarScan(BinaryReader& reader);
+void writeTofScan(BinaryWriter& writer, const TofScan& scan);
+TofScan readTofScan(BinaryReader& reader);
 
 void writeUwb(BinaryWriter& writer, const UwbMeasurement& sample);
 UwbMeasurement readUwb(BinaryReader& reader);

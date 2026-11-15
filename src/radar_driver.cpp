@@ -75,9 +75,9 @@ bool RadarDriver::open(std::string& error)
 
 bool RadarDriver::configure(std::string& error)
 {
-    if (config_.cli_port.empty())
+    if (config_.cfg_port.empty())
     {
-        error = "radar CLI port is required to send a .cfg file";
+        error = "radar config port is required to send a .cfg file";
         return false;
     }
     std::ifstream file(config_.config_file);
@@ -86,15 +86,15 @@ bool RadarDriver::configure(std::string& error)
         error = "cannot open radar config file " + config_.config_file;
         return false;
     }
-    SerialPort cli;
-    if (!cli.open(config_.cli_port, 115200, error)) return false;
+    SerialPort cfg;
+    if (!cfg.open(config_.cfg_port, 115200, error)) return false;
 
     std::string line;
     while (std::getline(file, line))
     {
         line = trim(line);
         if (line.empty() || line[0] == '#' || line[0] == '%') continue;
-        if (!cli.writeAll(line + "\n", error)) return false;
+        if (!cfg.writeAll(line + "\n", error)) return false;
         std::this_thread::sleep_for(std::chrono::milliseconds(line.rfind("sensorStart", 0) == 0 ? 100 : 8));
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -198,16 +198,16 @@ bool RadarDriver::parsePacket(const uint8_t* packet, std::size_t size, RadarFram
         detection.from_radar = true;
         frame.detections.push_back(detection);
     }
-    transformToBody(frame);
+    transformToBody(frame, config_);
     return true;
 }
 
-void RadarDriver::transformToBody(RadarFrame& frame) const
+void RadarDriver::transformToBody(RadarFrame& frame, const RadarConfig& config)
 {
-    const float yaw = degToRad(config_.mount_yaw_deg);
+    const float yaw = degToRad(config.yaw_offset_deg);
     for (auto& detection : frame.detections)
     {
-        detection.position = rotateZ(detection.position, yaw) + config_.mount_translation_m;
+        detection.position = rotateZ(detection.position, yaw) + config.mount_translation_m;
         detection.velocity = rotateZ(detection.velocity, yaw);
         detection.range = norm(detection.position);
     }

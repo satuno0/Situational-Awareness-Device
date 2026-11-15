@@ -41,7 +41,7 @@ public:
     // UWB confirmation only. It never creates a track.
     bool applyIdentity(uint32_t id, uint16_t tag_id, float measurement_confidence, uint64_t now_ms);
 
-    // Novelda confirmation only. It only reinforces an already-occluded track.
+    // Presence confirmation only. It only reinforces an already-occluded track.
     bool applyPresenceSupport(uint32_t id, float zone_confidence, uint64_t now_ms);
 
     uint64_t lastTagSeenMs(uint32_t id) const;

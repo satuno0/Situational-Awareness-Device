@@ -17,6 +17,7 @@ struct SimulationConfig
     // without a camera. This is a sensor measurement only; it never creates a
     // track or affects person classification.
     bool marker_enabled = true;
+    bool wrist_sweep = false;
 };
 
 // Deterministic synthetic handheld session used for development, replay tests

@@ -30,11 +30,15 @@ struct HapticConfig
     bool enabled = true;
     bool verbose = false;
     std::string device_path;
+    std::string drv2605_i2c_device;
+    uint8_t drv2605_i2c_address = 0x5A;
     int active_value = 1;
     int inactive_value = 0;
 };
 
 const char* hapticPatternName(HapticPattern pattern);
+std::optional<float> closeRangeCollisionRange(const WorldModel& world,
+                                              const UltrasonicMeasurement* ultrasonic);
 
 class Haptics
 {
@@ -53,7 +57,8 @@ public:
 
 private:
     void workerLoop();
-    void setMotor(bool on);
+    bool setMotor(bool on);
+    bool writeDrv2605(uint8_t reg, uint8_t value, std::string& error);
     void resetTracking();
 
     HapticConfig config_;
@@ -73,6 +78,8 @@ private:
     bool previous_presence_ = false;
 
     std::ofstream device_;
+    int drv2605_fd_ = -1;
+    bool drv2605_active_ = false;
 };
 
 } // namespace sa

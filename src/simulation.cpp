@@ -77,8 +77,8 @@ Pose2D Simulation::poseAt(double t) const
     const double u = std::clamp(t - 3.0, 0.0, 12.0);
     const double phase = kPi * u / 12.0;
     Pose2D pose{};
-    pose.x = static_cast<float>(0.55 * 0.5 * (1.0 - std::cos(phase)));
-    pose.y = static_cast<float>(0.10 * std::sin(phase));
+    pose.x = static_cast<float>(-0.10 * std::sin(phase));
+    pose.y = static_cast<float>(0.55 * 0.5 * (1.0 - std::cos(phase)));
     pose.yaw_deg = static_cast<float>(4.5 * std::sin(phase));
     return pose;
 }
@@ -90,19 +90,19 @@ Vec3 Simulation::personPosition(int index, double t) const
     switch (index)
     {
     case 0:
-        return {3.20f + 0.30f * static_cast<float>(std::sin(0.18 * t)),
-                1.00f + 0.35f * static_cast<float>(std::cos(0.20 * t)),
+        return {-1.00f - 0.35f * static_cast<float>(std::cos(0.20 * t)),
+                3.20f + 0.30f * static_cast<float>(std::sin(0.18 * t)),
                 0.95f};
     case 1:
-        return {2.90f + 0.20f * static_cast<float>(std::sin(0.20 * t)),
-                -0.52f + 0.42f * static_cast<float>(std::sin(0.31 * t)),
+        return {0.52f - 0.42f * static_cast<float>(std::sin(0.31 * t)),
+                2.90f + 0.20f * static_cast<float>(std::sin(0.20 * t)),
                 0.95f};
     case 2:
-        return {4.80f + 0.20f * static_cast<float>(std::cos(0.16 * t)),
-                2.10f + 0.32f * static_cast<float>(std::sin(0.23 * t)),
+        return {-2.10f - 0.32f * static_cast<float>(std::sin(0.23 * t)),
+                4.80f + 0.20f * static_cast<float>(std::cos(0.16 * t)),
                 1.00f};
     default:
-        return {3.50f, 4.40f, 1.00f};
+        return {-4.40f, 3.50f, 1.00f};
     }
 }
 
@@ -116,7 +116,7 @@ Vec3 Simulation::markerPositionAt(double t) const
 {
     // A single red marker on a wall ahead of the device. Its lateral motion
     // sweeps through the wrist aim cone, so vibration engages and releases.
-    return {3.55f, 0.20f + 0.70f * static_cast<float>(std::sin(0.45 * t)), 1.18f};
+    return {-0.20f - 0.70f * static_cast<float>(std::sin(0.45 * t)), 3.55f, 1.18f};
 }
 
 Simulation::Person Simulation::personAt(int index, double t) const
@@ -143,9 +143,9 @@ bool Simulation::lineOfSight(const Vec3& origin, const Vec3& target, double& blo
     {
         float min_x, min_y, max_x, max_y;
     } boxes[] = {
-        {2.07f, -0.58f, 2.63f, -0.02f},
-        {1.05f, -0.05f, 1.45f, 0.35f},
-        {0.40f, 1.95f, 1.40f, 2.65f}};
+        {0.02f, 2.07f, 0.58f, 2.63f},
+        {-0.35f, 1.05f, 0.05f, 1.45f},
+        {-2.65f, 0.40f, -1.95f, 1.40f}};
     float closest = std::numeric_limits<float>::infinity();
     for (const auto& box : boxes)
     {
@@ -190,12 +190,11 @@ void Simulation::addStaticReturns(RadarFrame& frame, const Pose2D& pose, double 
         float x0, y0, x1, y1;
     };
     const Segment walls[] = {
-        {-2.0f, -3.5f, -2.0f, 3.5f},
-        {7.0f, -3.5f, 7.0f, 3.5f},
-        {-2.0f, -3.5f, 7.0f, -3.5f},
-        {-2.0f, 3.5f, 7.0f, 3.5f}};
+        {-3.5f, -2.0f, -3.5f, 7.0f},
+        {3.5f, -2.0f, 3.5f, 7.0f},
+        {-3.5f, -2.0f, 3.5f, -2.0f},
+        {-3.5f, 7.0f, 3.5f, 7.0f}};
 
-    const float yaw = degToRad(pose.yaw_deg);
     const float max_range = 7.0f;
 
     auto emitStatic = [&](float wx, float wy, float wz) {
@@ -203,7 +202,8 @@ void Simulation::addStaticReturns(RadarFrame& frame, const Pose2D& pose, double 
         const float dy = wy - pose.y;
         const float distance = std::sqrt(dx * dx + dy * dy);
         if (distance < 0.2f || distance > max_range) return;
-        const float bearing = wrapRad(std::atan2(dy, dx) - yaw);
+        const Vec3 body = poseInverseApply(pose, {wx, wy, wz});
+        const float bearing = std::atan2(body.x, body.y);
         if (std::abs(bearing) > degToRad(60.0f)) return;
         double blocked = 0.0;
         if (!lineOfSight(origin, {wx, wy, wz}, blocked)) return;
@@ -228,9 +228,9 @@ void Simulation::addStaticReturns(RadarFrame& frame, const Pose2D& pose, double 
     {
         float min_x, min_y, max_x, max_y, z;
     } objects[] = {
-        {2.07f, -0.58f, 2.63f, -0.02f, 0.9f},
-        {1.05f, -0.05f, 1.45f, 0.35f, 0.4f},
-        {0.40f, 1.95f, 1.40f, 2.65f, 0.7f}};
+        {0.02f, 2.07f, 0.58f, 2.63f, 0.9f},
+        {-0.35f, 1.05f, 0.05f, 1.45f, 0.4f},
+        {-2.65f, 0.40f, -1.95f, 1.40f, 0.7f}};
     for (const auto& object : objects)
     {
         const float sx = object.max_x - object.min_x;
@@ -258,7 +258,6 @@ void Simulation::addPersonReturns(RadarFrame& frame, const Pose2D& pose, double 
     const Pose2D p1 = poseAt(t + 0.01);
     const Vec3 device_velocity{(p1.x - p0.x) / 0.02f, (p1.y - p0.y) / 0.02f, 0.0f};
     const Vec3 origin{pose.x, pose.y, 0.0f};
-    const float yaw = degToRad(pose.yaw_deg);
 
     for (int index = 0; index < 3; ++index)
     {
@@ -266,7 +265,8 @@ void Simulation::addPersonReturns(RadarFrame& frame, const Pose2D& pose, double 
         const Vec3 delta = person.position - origin;
         const float distance = std::sqrt(delta.x * delta.x + delta.y * delta.y);
         if (distance < 0.3f || distance > 7.0f) continue;
-        if (std::abs(wrapRad(std::atan2(delta.y, delta.x) - yaw)) > degToRad(60.0f)) continue;
+        const Vec3 body = poseInverseApply(pose, person.position);
+        if (std::abs(std::atan2(body.x, body.y)) > degToRad(60.0f)) continue;
         double blocked = 0.0;
         if (!lineOfSight(origin, person.position, blocked)) continue;
 
@@ -284,15 +284,15 @@ void Simulation::addPersonReturns(RadarFrame& frame, const Pose2D& pose, double 
 float Simulation::ultrasonicForward(const Pose2D& pose, double t) const
 {
     const float yaw = degToRad(pose.yaw_deg);
-    const float dx = std::cos(yaw);
-    const float dy = std::sin(yaw);
+    const float dx = -std::sin(yaw);
+    const float dy = std::cos(yaw);
     float best = 4.0f;
 
     const float walls[][4] = {
-        {-2.0f, -3.5f, -2.0f, 3.5f},
-        {7.0f, -3.5f, 7.0f, 3.5f},
-        {-2.0f, -3.5f, 7.0f, -3.5f},
-        {-2.0f, 3.5f, 7.0f, 3.5f}};
+        {-3.5f, -2.0f, -3.5f, 7.0f},
+        {3.5f, -2.0f, 3.5f, 7.0f},
+        {-3.5f, -2.0f, 3.5f, -2.0f},
+        {-3.5f, 7.0f, 3.5f, 7.0f}};
     for (const auto& wall : walls)
     {
         const float min_x = std::min(wall[0], wall[2]) - 0.02f;
@@ -306,9 +306,9 @@ float Simulation::ultrasonicForward(const Pose2D& pose, double t) const
     {
         float min_x, min_y, max_x, max_y;
     } boxes[] = {
-        {2.07f, -0.58f, 2.63f, -0.02f},
-        {1.05f, -0.05f, 1.45f, 0.35f},
-        {0.40f, 1.95f, 1.40f, 2.65f}};
+        {0.02f, 2.07f, 0.58f, 2.63f},
+        {-0.35f, 1.05f, 0.05f, 1.45f},
+        {-2.65f, 0.40f, -1.95f, 1.40f}};
     for (const auto& box : boxes)
     {
         const float hit = rayBoxDistance(pose.x, pose.y, dx, dy, box.min_x, box.min_y, box.max_x, box.max_y);
@@ -377,7 +377,7 @@ bool Simulation::next(SensorFrame& frame)
             uwb.tag_id = safe.tag_id;
             uwb.range_m = std::sqrt(body.x * body.x + body.y * body.y) + 0.04f * gaussian(1.0f);
             uwb.has_aoa = true;
-            uwb.aoa_rad = std::atan2(body.y, body.x) + 0.015f * gaussian(1.0f);
+            uwb.aoa_rad = std::atan2(body.x, body.y) + 0.015f * gaussian(1.0f);
             const Vec3 d0 = personPosition(0, t - 0.05) - Vec3{poseAt(t - 0.05).x, poseAt(t - 0.05).y, 0.0f};
             const Vec3 d1 = personPosition(0, t + 0.05) - Vec3{poseAt(t + 0.05).x, poseAt(t + 0.05).y, 0.0f};
             const float r0 = std::sqrt(d0.x * d0.x + d0.y * d0.y);
@@ -393,7 +393,8 @@ bool Simulation::next(SensorFrame& frame)
         NoveldaMeasurement presence{};
         presence.timestamp_ms = timestamp;
         presence.range_m = std::sqrt(db.x * db.x + db.y * db.y) + 0.12f * gaussian(1.0f);
-        presence.bearing_center_rad = wrapRad(std::atan2(db.y, db.x) - degToRad(pose.yaw_deg));
+        const Vec3 presence_body = poseInverseApply(pose, b);
+        presence.bearing_center_rad = std::atan2(presence_body.x, presence_body.y);
         presence.bearing_width_rad = degToRad(22.0f);
         presence.motion = 0.55f;
         presence.breathing = 0.72f + 0.08f * static_cast<float>(std::sin(0.7 * t));
@@ -406,7 +407,8 @@ bool Simulation::next(SensorFrame& frame)
         NoveldaMeasurement through{};
         through.timestamp_ms = timestamp;
         through.range_m = std::sqrt(dd.x * dd.x + dd.y * dd.y) + 0.20f * gaussian(1.0f);
-        through.bearing_center_rad = wrapRad(std::atan2(dd.y, dd.x) - degToRad(pose.yaw_deg));
+        const Vec3 through_body = poseInverseApply(pose, d);
+        through.bearing_center_rad = std::atan2(through_body.x, through_body.y);
         through.bearing_width_rad = degToRad(18.0f);
         through.motion = 0.12f;
         through.breathing = 0.66f;
@@ -428,9 +430,9 @@ bool Simulation::next(SensorFrame& frame)
     {
         const Vec3 marker_world = markerPositionAt(t);
         const Vec3 body = poseInverseApply(pose, marker_world);
-        const float bearing = std::atan2(body.y, body.x);
+        const float bearing = std::atan2(body.x, body.y);
         constexpr float kCameraHalfFovRad = 0.56f; // about 32 degrees
-        if (body.x > 0.25f && std::abs(bearing) <= kCameraHalfFovRad)
+        if (body.y > 0.25f && std::abs(bearing) <= kCameraHalfFovRad)
         {
             MarkerObservation marker{};
             marker.timestamp_ms = timestamp;
@@ -444,6 +446,15 @@ bool Simulation::next(SensorFrame& frame)
             marker.valid = true;
             frame.marker = marker;
         }
+    }
+
+    if (config_.wrist_sweep)
+    {
+        WristOrientation wrist{};
+        wrist.timestamp_ms = timestamp;
+        wrist.wrist_yaw_deg = 90.0f * std::sin(0.7f * static_cast<float>(t));
+        wrist.wrist_pitch_deg = 5.0f * std::sin(0.3f * static_cast<float>(t));
+        frame.wrist_orientation = wrist;
     }
 
     ++tick_;

@@ -47,7 +47,7 @@ bool ImuDriver::open(std::string& error)
         return false;
     }
 #if defined(__linux__)
-    fd_ = ::open(config_.i2c_device.c_str(), O_RDWR);
+    fd_ = ::open(config_.i2c_device.c_str(), O_RDWR | O_NONBLOCK);
     if (fd_ < 0)
     {
         error = "failed to open " + config_.i2c_device + ": " + std::strerror(errno);
