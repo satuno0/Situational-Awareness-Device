@@ -17,10 +17,13 @@ target_include_directories(vl53l8cx_uld SYSTEM PUBLIC
 
 set(SA_CORE_SOURCES
     src/announcer.cpp
+    src/breadcrumb_navigator.cpp
     src/desktop_camera.cpp
+    src/emcon_controller.cpp
     src/fusion_engine.cpp
     src/gpio_line.cpp
     src/haptics.cpp
+    src/hub_server.cpp
     src/imu_driver.cpp
     src/kalman_track.cpp
     src/lidar_driver.cpp
@@ -65,14 +68,21 @@ endif()
 add_executable(sa_daemon src/main.cpp)
 target_link_libraries(sa_daemon PRIVATE sa_core)
 
+add_executable(core-sa src/main.cpp)
+target_link_libraries(core-sa PRIVATE sa_core)
+
 add_executable(sa_tests tests/test_core.cpp)
 target_link_libraries(sa_tests PRIVATE sa_core)
+
+add_executable(sa_runtime_tests tests/test_runtime_modules.cpp)
+target_link_libraries(sa_runtime_tests PRIVATE sa_core)
 
 add_executable(sa_dxf_tests tests/test_dxf.cpp)
 target_link_libraries(sa_dxf_tests PRIVATE sa_core)
 
 enable_testing()
 add_test(NAME sa_core_tests COMMAND sa_tests)
+add_test(NAME sa_runtime_module_tests COMMAND sa_runtime_tests)
 add_test(NAME sa_dxf_parser
          COMMAND sa_dxf_tests "${CMAKE_CURRENT_SOURCE_DIR}/schematics/SA Project_Box Outline.dxf")
 
@@ -87,5 +97,5 @@ add_test(NAME sa_replay_verify
                  --no-telemetry --no-haptics)
 set_tests_properties(sa_replay_verify PROPERTIES DEPENDS sa_simulate_record)
 
-install(TARGETS sa_daemon RUNTIME DESTINATION bin)
+install(TARGETS sa_daemon core-sa RUNTIME DESTINATION bin)
 install(DIRECTORY web DESTINATION share/sa_daemon)
