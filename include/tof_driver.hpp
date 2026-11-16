@@ -30,7 +30,7 @@ struct TofConfig
     float vertical_fov_deg = 45.0f;
     float max_range_m = 4.0f;
     uint8_t ranging_frequency_hz = 15;
-    uint16_t left_i2c_address = 0x54;
+    uint16_t left_i2c_address = 0x60;
     uint16_t right_i2c_address = 0x52;
     bool enabled = true;
 };

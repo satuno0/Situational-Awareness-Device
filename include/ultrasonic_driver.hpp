@@ -3,6 +3,8 @@
 #include "serial_port.hpp"
 #include "types.hpp"
 
+#include <cstddef>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -27,9 +29,12 @@ public:
     void close();
     bool isOpen() const { return serial_.isOpen(); }
     bool poll(std::vector<UltrasonicMeasurement>& measurements);
+    bool ingestBytes(const uint8_t* data, std::size_t size, uint64_t timestamp_ms,
+                     std::vector<UltrasonicMeasurement>& measurements);
 
 private:
-    void parseLine(const std::string& line, std::vector<UltrasonicMeasurement>& measurements);
+    void parseLine(const std::string& line, uint64_t timestamp_ms,
+                   std::vector<UltrasonicMeasurement>& measurements);
 
     UltrasonicConfig config_;
     SerialPort serial_;

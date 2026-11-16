@@ -11,7 +11,9 @@
 #include "serialization.hpp"
 #include "simulation.hpp"
 #include "track_manager.hpp"
+#include "tof_driver.hpp"
 #include "types.hpp"
+#include "ultrasonic_driver.hpp"
 #include "wrist_haptics.hpp"
 #include "wallpad_driver.hpp"
 
@@ -837,6 +839,32 @@ void testWallpadZoneParser()
           "wall-pad parser rejects invalid bearing widths");
 }
 
+void testUltrasonicCarriageReturnBridge()
+{
+    UltrasonicDriver driver;
+    std::vector<UltrasonicMeasurement> measurements;
+    const std::string first = "R1234\r";
+    check(driver.ingestBytes(reinterpret_cast<const uint8_t*>(first.data()), first.size(), 420,
+                             measurements),
+          "ultrasonic parser accepts the locked carriage-return terminator");
+    check(measurements.size() == 1 && measurements[0].valid &&
+              near(measurements[0].range_m, 1.234f, 1.0e-5f) &&
+              measurements[0].timestamp_ms == 420,
+          "ultrasonic CR record preserves range and injected timestamp");
+
+    const std::string partial = "R56";
+    check(!driver.ingestBytes(reinterpret_cast<const uint8_t*>(partial.data()), partial.size(), 430,
+                              measurements),
+          "ultrasonic parser waits for a complete record across reads");
+    const std::string remainder = "78\r\nR0000\r";
+    check(driver.ingestBytes(reinterpret_cast<const uint8_t*>(remainder.data()), remainder.size(), 440,
+                             measurements),
+          "ultrasonic parser accepts split CR and CRLF-terminated records");
+    check(measurements.size() == 3 && near(measurements[1].range_m, 5.678f, 1.0e-5f) &&
+              !measurements[2].valid,
+          "ultrasonic parser emits both complete records and ignores the CRLF empty line");
+}
+
 void testLd19PacketParser()
 {
     std::array<uint8_t, 47> packet{};
@@ -872,6 +900,10 @@ void testLidarBurstState()
 {
     LidarConfig config;
     config.power_gate_enabled = false;
+    check(config.port == "/dev/ttyS2", "LiDAR defaults to the locked UART2 device path");
+    check(config.motor_enable.chip == "/dev/gpiochip3" &&
+              config.motor_enable.offset == 12 && config.motor_enable.active_high,
+          "LiDAR defaults to the locked active-high motor-gate GPIO");
     LidarDriver lidar(config);
     std::string error;
     check(lidar.triggerScanBurst(1000), "LiDAR burst starts from an injected timestamp");
@@ -926,6 +958,22 @@ void testLidarOwnsMapping()
     check(fallback_world.occupancy.worldToCell(3.0f, 3.0f, radar_x, radar_y) &&
               fallback_world.occupancy.probability(radar_x, radar_y) > 0.55f,
           "radar rays map only when LiDAR health is false");
+}
+
+void testFinalTofHardwareDefaults()
+{
+    const TofConfig config;
+    check(config.i2c_device == "/dev/i2c-1", "ToF defaults to the locked I2C bus");
+    check(config.left.xshut.chip == "/dev/gpiochip3" &&
+              config.left.xshut.offset == 10 &&
+              config.left.mount_yaw_deg == 30.0f,
+          "left ToF defaults to its locked XSHUT and +30-degree mounting");
+    check(config.right.xshut.chip == "/dev/gpiochip3" &&
+              config.right.xshut.offset == 11 &&
+              config.right.mount_yaw_deg == -30.0f,
+          "right ToF defaults to its locked XSHUT and -30-degree mounting");
+    check(config.left_i2c_address == 0x60 && config.right_i2c_address == 0x52,
+          "ToF defaults to 7-bit addresses 0x30 and 0x29 in ST-encoded form");
 }
 
 void testTofOwnsMapping()
@@ -1593,8 +1641,10 @@ int main()
     testSensorSelection();
     testLidarPointParser();
     testWallpadZoneParser();
+    testUltrasonicCarriageReturnBridge();
     testLd19PacketParser();
     testLidarBurstState();
+    testFinalTofHardwareDefaults();
     testLidarOwnsMapping();
     testTofOwnsMapping();
     testAnnouncements();

@@ -17,7 +17,7 @@ constexpr float kDefaultLidarBurstDurationSec = 1.5f;
 
 struct LidarConfig
 {
-    std::string port;
+    std::string port = "/dev/ttyS2";
     int baud_rate = 230400;
     Vec3 mount_translation_m{0.0f, 0.0f, 0.0f};
     float mount_yaw_deg = 0.0f;

@@ -192,7 +192,7 @@ sudo ./sa_daemon \
     --radar-rear-data /dev/ttyUSB2 \
     --radar-rear-cfg /dev/ttyUSB3 \
     --radar-cfg /path/to/iwr6843_handheld.cfg \
-    --lidar /dev/ttyUSB4 \
+    --lidar /dev/ttyS2 \
     --imu /dev/i2c-1 \
     --uwb /dev/ttyACM0 \
     --novelda /dev/ttyACM1 \
@@ -208,23 +208,49 @@ one data UART and one configuration UART. The front radar is mounted at 0
 degrees; the rear radar is rotated 180 degrees in the driver before the two
 frames are merged for tracking.
 
-#### Finalized hardware profile
+#### Finalized hardware profile (locked v1.0)
 
-- Radxa Zero 3W, 4 GB RAM / 32 GB eMMC
-- Two TI IWR6843AOPEVM radars: front (`/dev/ttyUSB0`, `/dev/ttyUSB1`) and rear
-  (`/dev/ttyUSB2`, `/dev/ttyUSB3`)
-- RPLIDAR S2 or YDLIDAR TG30 for 30 m on-demand 360-degree scans. The current
-  driver consumes these through an ASCII `LIDAR,x_m,y_m[,z_m]` bridge; its
-  native binary protocol support remains LD19-specific (12 m).
-- Two ST VL53L8CX 8x8 multi-zone ToF sensors for continuous near-range mapping
-- ICM-42688-P IMU, two DWM3000 UWB modules, TMP117 temperature sensor, and
-  DRV2605L-controlled LRA
-- Separate wrist-worn IMU/LRA module connected through a BLE-UART serial bridge
-- Bluetooth earbuds for optional spoken guidance
-- 1S2P 21700 battery pack, nominally 10,000 mAh, with battery protection and
-  regulated rails appropriate to the assembled device
-- Optional detachable LibreVNA SFCW wall-pad (1.2-3.5 GHz), using a USB serial
-  sweep adapter that emits validated 1D/sector presence estimates.
+- **Core:** Radxa Zero 3W, 4 GB RAM / 32 GB eMMC.
+- **Power:** 1S2P 21700 pack (2 x 5000 mAh), 15 A 1S BMS, off-only USB-C
+  charger, 8 A fuse, and latching switch. The pack feeds a 6 A synchronous
+  5V_SYS boost; a separate 1.5 A 3V3_SENS buck powers sensors and is strictly
+  isolated from Radxa 3.3 V pins 1 and 17. Use shunt-damped C-L-C pi-filters
+  on 5V_RADAR_A and 5V_RADAR_B, with device-side USB VBUS injection.
+- **Primary 360-degree tracking:** two TI IWR6843AOPEVM radars. Front data/config
+  are `/dev/ttyUSB0` and `/dev/ttyUSB1` at 0 degrees; rear data/config are
+  `/dev/ttyUSB2` and `/dev/ttyUSB3` at 180 degrees.
+- **Continuous surface mapping:** two ST VL53L8CX 8x8 ToF arrays, yawed +30
+  degrees (left) and -30 degrees (right), for close-range mapping.
+- **Orientation and environment:** TDK ICM-42688-P IMU, TI TMP117 temperature
+  sensor, and TI DRV2605L with an LRA for main-unit haptics.
+- **On-demand scan:** LDROBOT LD19 on UART2 (`/dev/ttyS2`, 230400 baud) using
+  its native packet format, or an RPLIDAR S2 / YDLIDAR TG30 through the
+  documented ASCII bridge for 30 m 360-degree bursts. The motor is
+  power-gated and off at startup.
+- **Optional confirmation bridges:** two DWM3000 UWB modules, Novelda / XeThru
+  X4M200, and a detachable LibreVNA SFCW concrete wall-pad (1.2-3.5 GHz).
+  They confirm/reinforce existing tracks or report sector presence; none
+  creates tracks. LibreVNA output is 1D/sector presence only, never 3D imaging.
+- **Wearable:** separate battery-powered Seeed XIAO ESP32-C3 or nRF52840 Sense
+  with an IMU and DRV2605L/LRA, connected through a BLE-UART bridge. It sends
+  orientation at 50 Hz and receives wrist haptic commands at 115200 baud.
+- **Audio:** paired Bluetooth earbuds; no wired I2S DAC/amplifier circuit.
+
+#### Locked buses, addresses, and pinout
+
+- Shared `I2C3_M0` is exposed as `/dev/i2c-1`: physical pin 3 SDA and pin 5
+  SCL. The ICM-42688-P uses address `0x68`, TMP117 `0x48`, and main DRV2605L
+  `0x5A` (the haptics worker performs its I2C output).
+- Both ToF sensors use this bus. Left VL53L8CX is assigned 7-bit address
+  `0x30` at boot (ST ULD encoded address `0x60`), with XSHUT/LPn on
+  `/dev/gpiochip3` line 10, physical pin 18, yaw +30 degrees. Right remains at
+  default 7-bit address `0x29` (ST encoded `0x52`), with XSHUT/LPn on line 11,
+  physical pin 29, yaw -30 degrees.
+- LD19 UART2 RX is `/dev/ttyS2`, physical pin 10; disable the Linux debug
+  console on that UART. Its TPS22965 high-side load switch is controlled by
+  `/dev/gpiochip3` line 12, physical pin 31, active high. The gate remains low
+  at startup and powers the sensor only for a 1.5 s `CMD:SCAN_360` burst;
+  discard the first 300 ms of scan frames.
 
 The default occupancy grid is 280 x 280 cells at 0.25 m per cell, covering a
 70 m x 70 m area centered on the device. 30 m scans are matched and mapped
@@ -287,12 +313,14 @@ Hardware:
   --radar-cfg <file>         mmWave .cfg file sent to each radar
   --radar-data <dev>         Alias for --radar-front-data
   --radar-cli <dev>          Alias for --radar-front-cfg
-  --lidar <dev>              LD19 UART or ASCII bridge (LIDAR,x_m,y_m[,z_m])
+  --lidar <dev>              LD19 or ASCII LIDAR,x_m,y_m[,z_m] (default /dev/ttyS2)
   --lidar-baud <rate>        LiDAR UART baud rate (default 230400 for LD19)
   --lidar-gpio <spec>        LD19 motor power gate (default /dev/gpiochip3:12:high)
   --tof-i2c <dev>            Dual VL53L8CX I2C bus (default /dev/i2c-1)
   --tof-left-gpio <spec>     Left sensor XSHUT line (default /dev/gpiochip3:10:high)
   --tof-right-gpio <spec>    Right sensor XSHUT line (default /dev/gpiochip3:11:high)
+  --tof-left-addr <hex>      Left ST-encoded address (default 0x60 / 7-bit 0x30)
+  --tof-right-addr <hex>     Right ST-encoded address (default 0x52 / 7-bit 0x29)
   --tof-left-yaw <deg>       Left sensor yaw (default 30)
   --tof-right-yaw <deg>      Right sensor yaw (default -30)
   --no-tof                   Disable dual ToF
@@ -397,7 +425,10 @@ runs on the driver worker, and completed rays are timestamped before entering
 the deterministic fusion/replay pipeline.
 
 The LD19 is optional and normally unpowered. The default GPIO gate is active
-high and must control a suitable MOSFET power switch, not the motor directly.
+high and must control the TPS22965 high-side load switch, not the motor
+directly. The default UART is `/dev/ttyS2` at 230400 baud; disable its Linux
+debug console. Physical pin 10 is UART2 RX and `/dev/gpiochip3` line 12
+(physical pin 31) is the active-high gate.
 An active localhost client can request a 1.5-second burst with the dashboard
 button. The first 300 ms are discarded for spin-up; retriggers during a burst
 are ignored. Verify the LD19 packet/CRC and GPIO polarity on the target Linux
@@ -439,8 +470,10 @@ automatically; otherwise press Ctrl+C.
 
 ## Wrist pointing-cone guidance
 
-The separate wearable module streams orientation as newline-delimited
-`WRIST,yaw_deg,pitch_deg` records over a non-blocking serial/BLE-UART bridge.
+The separate battery-powered Seeed XIAO ESP32-C3 or nRF52840 Sense module
+streams orientation at 50 Hz as newline-delimited
+`WRIST,yaw_deg,pitch_deg` records over a non-blocking BLE-UART bridge at
+115200 baud. Its IMU and DRV2605L/LRA are local to the wearable.
 Point the wrist straight forward (+Y in the scanner frame) during startup; the
 first fresh yaw sample establishes zero, with `--wrist-offset` applied as an
 additional correction. Orientation samples are timestamped by the processing
@@ -703,10 +736,10 @@ the attitude estimator handles short-term integration.
 ### DWM3000 UWB
 
 A small MCU or firmware bridge owns the DWM3000 SPI radio. The daemon consumes
-one ranging result per line:
+one ranging result per line, with optional range-rate and fixed-anchor fields:
 
 ```
-tag_id,range_m,aoa_deg,confidence[,range_rate_mps]
+tag_id,range_m,aoa_deg,confidence[,range_rate_mps][,is_fixed_anchor,anchor_x_m,anchor_y_m]
 ```
 
 Empty or `nan` AoA fields mean the optional angle estimate is unavailable.
@@ -730,9 +763,9 @@ The result is presence evidence only. The driver never produces a track, and
 
 ### MaxBotix ultrasonic
 
-The driver parses the asynchronous UART output (for example `R1234\r` in
-millimetres) at 9600 baud and supplies the forward collision range used by
-haptics.
+The optional MaxBotix bridge sends `R<mm>\r` at 9600 baud (for example,
+`R1234\r`). The driver parses the range in millimetres and supplies the forward
+collision range used by haptics.
 
 ## Tests and verification
 
@@ -806,6 +839,8 @@ tracks, grid, and confidence values.
   boards, firmware, and wiring. Simulation and replay are cross-platform.
 - The IWR6843 profile, UWB bridge firmware, and Novelda bridge firmware are
   external deliverables.
+- The TMP117 is part of the locked hardware BOM and uses address `0x48`, but
+  the daemon does not currently sample it or expose a TMP117 CLI option.
 - The red-marker camera, wrist actuator, and earpiece/speaker bridge are also
   external hardware. The daemon's side is implemented and tested, but no
   physical device is bundled or validated here.

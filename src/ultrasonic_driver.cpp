@@ -32,7 +32,9 @@ void UltrasonicDriver::close()
     line_buffer_.clear();
 }
 
-void UltrasonicDriver::parseLine(const std::string& line, std::vector<UltrasonicMeasurement>& measurements)
+void UltrasonicDriver::parseLine(const std::string& line,
+                                 uint64_t timestamp_ms,
+                                 std::vector<UltrasonicMeasurement>& measurements)
 {
     if (line.size() < 5 || (line[0] != 'R' && line[0] != 'r')) return;
     const char* begin = line.c_str() + 1;
@@ -41,7 +43,7 @@ void UltrasonicDriver::parseLine(const std::string& line, std::vector<Ultrasonic
     if (end == begin || millimetres < 0) return;
 
     UltrasonicMeasurement sample{};
-    sample.timestamp_ms = monoNowMs();
+    sample.timestamp_ms = timestamp_ms;
     if (millimetres == 0)
     {
         sample.valid = false;
@@ -61,20 +63,27 @@ bool UltrasonicDriver::poll(std::vector<UltrasonicMeasurement>& measurements)
     std::vector<uint8_t> incoming;
     std::string error;
     if (!serial_.readAvailable(incoming, error)) return false;
-    if (incoming.empty()) return false;
+    return ingestBytes(incoming.data(), incoming.size(), monoNowMs(), measurements);
+}
 
-    line_buffer_.append(reinterpret_cast<const char*>(incoming.data()), incoming.size());
+bool UltrasonicDriver::ingestBytes(const uint8_t* data,
+                                   std::size_t size,
+                                   uint64_t timestamp_ms,
+                                   std::vector<UltrasonicMeasurement>& measurements)
+{
+    if (data == nullptr || size == 0) return false;
+    line_buffer_.append(reinterpret_cast<const char*>(data), size);
     if (line_buffer_.size() > 16u * 1024u) line_buffer_.erase(0, line_buffer_.size() - 1024);
 
     bool got = false;
-    std::size_t newline = 0;
-    while ((newline = line_buffer_.find('\n')) != std::string::npos)
+    std::size_t terminator = 0;
+    while ((terminator = line_buffer_.find_first_of("\r\n")) != std::string::npos)
     {
-        std::string line = line_buffer_.substr(0, newline);
-        line_buffer_.erase(0, newline + 1);
-        while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+        std::string line = line_buffer_.substr(0, terminator);
+        line_buffer_.erase(0, terminator + 1);
+        while (!line.empty() && line.back() == ' ') line.pop_back();
         const std::size_t before = measurements.size();
-        parseLine(line, measurements);
+        parseLine(line, timestamp_ms, measurements);
         if (measurements.size() > before) got = true;
     }
     return got;
