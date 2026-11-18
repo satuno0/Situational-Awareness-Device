@@ -14,6 +14,9 @@ void BreadcrumbNavigator::clearWaypoints()
     volatile unsigned char* bytes =
         reinterpret_cast<volatile unsigned char*>(waypoints_.data());
     for (std::size_t i = 0; i < sizeof(waypoints_); ++i) bytes[i] = 0;
+    volatile unsigned char* anchor_bytes =
+        reinterpret_cast<volatile unsigned char*>(&sample_anchor_);
+    for (std::size_t i = 0; i < sizeof(sample_anchor_); ++i) anchor_bytes[i] = 0;
     count_ = 0;
     has_timestamp_ = false;
     last_timestamp_ms_ = 0;
@@ -24,18 +27,22 @@ bool BreadcrumbNavigator::setEnabled(bool enabled, const Pose2D& pose, uint64_t 
     if (!enabled)
     {
         enabled_ = false;
-        clearWaypoints();
+        has_timestamp_ = false;
+        last_timestamp_ms_ = 0;
         return true;
     }
-    if (enabled_) return true;
+    if (enabled_ && count_ != 0) return true;
     if (!validPose(pose)) return false;
 
-    clearWaypoints();
-    waypoints_[0] = {pose.x, pose.y};
-    count_ = 1;
+    enabled_ = true;
+    if (count_ == 0)
+    {
+        waypoints_[0] = {pose.x, pose.y};
+        count_ = 1;
+    }
+    sample_anchor_ = {pose.x, pose.y};
     last_timestamp_ms_ = timestamp_ms;
     has_timestamp_ = true;
-    enabled_ = true;
     return true;
 }
 
@@ -45,17 +52,24 @@ bool BreadcrumbNavigator::update(const Pose2D& pose, uint64_t timestamp_ms)
     if (!validPose(pose) || (has_timestamp_ && timestamp_ms < last_timestamp_ms_)) return false;
     last_timestamp_ms_ = timestamp_ms;
     has_timestamp_ = true;
-    if (count_ == 0) return false;
+    if (count_ == 0)
+    {
+        waypoints_[0] = {pose.x, pose.y};
+        sample_anchor_ = waypoints_[0];
+        count_ = 1;
+        return true;
+    }
 
-    float dx = pose.x - waypoints_[count_ - 1].x;
-    float dy = pose.y - waypoints_[count_ - 1].y;
+    float dx = pose.x - sample_anchor_.x;
+    float dy = pose.y - sample_anchor_.y;
     float distance = std::sqrt(dx * dx + dy * dy);
     while (distance >= kWaypointSpacingM && count_ < waypoints_.size())
     {
         const float fraction = kWaypointSpacingM / distance;
-        const HudPoint previous = waypoints_[count_ - 1];
-        const HudPoint next{previous.x + dx * fraction, previous.y + dy * fraction};
+        const HudPoint next{sample_anchor_.x + dx * fraction,
+                            sample_anchor_.y + dy * fraction};
         waypoints_[count_++] = next;
+        sample_anchor_ = next;
         dx = pose.x - next.x;
         dy = pose.y - next.y;
         distance = std::sqrt(dx * dx + dy * dy);

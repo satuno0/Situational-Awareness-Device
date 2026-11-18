@@ -80,6 +80,7 @@ include/                 Public interfaces and core data types
   haptics.hpp            Haptic pattern scheduler
   marker_detector.hpp    Red-marker RGB detector and bearing estimator
   marker_driver.hpp      MARK/RED camera-bridge serial protocol
+  glove_raycaster.hpp    Visible-track glove ray selection and timeout
   wrist_haptics.hpp      Wrist orientation bridge and pointing-cone haptics
   announcer.hpp          Deterministic spoken track summaries
   sensor_mode.hpp        Sensor preset/list parsing and frame filtering
@@ -91,6 +92,7 @@ src/                     Implementations of every header above, plus main.cpp
 tests/test_core.cpp      Behavioral and replay-determinism tests
 tests/test_dxf.cpp       DXF schematic parser test
 web/index.html           Phone-friendly live visualization
+firmware/xiao_wrist/     XIAO ESP32-C3 wrist/glove firmware scaffold
 third_party/st_vl53l8cx/ Bundled ST VL53L8CX ULD and BSD-3-Clause license
 maps/example_sa.txt      Example text schematic
 CMakeLists.txt           Library, daemon, tests, and CTest definitions
@@ -171,8 +173,9 @@ pipeline: `TrackManager`, `SlamManager`, `FusionEngine`, `WorldModel`, and
 telemetry. Recorded track/world snapshots are debug references only. They are
 never used to synthesize outputs. An embedded schematic timeline is replayed in
 order, including mid-session map uploads.
-The current session format is v8; v7 and earlier sessions are rejected because
-wrist orientation is now recorded as a replay input.
+The current session format is v10; v7 and earlier sessions are rejected because
+wrist orientation is now recorded as a replay input. Versions 8 and 9 remain
+replayable; v10 additionally records glove button events.
 
 `--verify` compares regenerated world and track state against those reference
 snapshots. A successful verification reports zero failures, zero CRC errors,
@@ -489,6 +492,40 @@ queued to a worker thread as newline-delimited
 `HAPTIC,duty_pct,freq_hz,pattern` commands, keeping serial writes off the
 processing loop.
 
+The Core also accepts an optional 10-byte glove packet beginning with `0x5B`;
+it validates the XOR checksum and signed centidegree ranges. `btn_mask` bit 0
+is the debounced physical wrist-button state; its rising edge toggles hand-scan
+ON/OFF. On the XIAO, the IMU and DRV2605L share D4/SDA and D5/SCL at 400 kHz;
+the firmware uses fixed buffers and no dynamic heap allocation. While ON, a
+7.5-degree, 8-meter ray may lock the nearest **visible, line-of-sight** fused
+track. A mapped wall or occupied ToF/LiDAR cell blocks the lock unless the
+target is no more than 0.15 m behind that return; occluded tracks and `PresenceZone`
+evidence never produce a lock or Geiger haptic. A zero-heading flag aligns the
+hand yaw to body-forward, and stale input expires after 250 ms. The firmware
+provides two local clicks when arming and one soft click when disarming; target
+click cadence increases with proximity. `reserved` bits report one-shot radar
+ping, quick-glance, trail-toggle, and panic-wipe events without changing the
+10-byte packet layout. BTN_1 double-click emits the existing zero-heading flag;
+BTN_2 double-click emits the trail-toggle event; BTN_3 hold emits panic-wipe.
+The [XIAO sketch](./firmware/xiao_wrist/wrist_glove_rx_tx.ino) uses USB Serial
+for packet TX and `HAPTIC` RX; it does not configure ESP-NOW. The existing ASCII
+`WRIST` bridge and `HAPTIC` response format remain supported. Per-target hollow
+markers for behind-wall people are not rendered; the existing sector-only
+presence representation is retained.
+
+The XIAO firmware scaffold uses 25 ms debouncing and the following additional
+switch pins: D1/GPIO3 (wrist scan), D2/GPIO4 (BTN_1), D3/GPIO5 (BTN_2), and
+D6/GPIO21 (BTN_3). It samples an MPU6050-compatible IMU, applies a 300 ms
+button lockout after acceleration exceeds 2.5 g, and uses 80 MHz while armed
+and 10 MHz with timer/GPIO light-sleep wakeups while disarmed. Local toggle
+confirmations and BTN_1/BTN_2/BTN_3 feedback use DRV2605L ROM waveforms.
+USB Serial is the configured packet transport; ESP-NOW is not enabled.
+
+Breadcrumb recording starts ON. `trail_toggle` pauses or resumes writes without
+removing stored points; `trail_purge` securely clears them and leaves recording
+OFF. The glove firmware's BTN_2 double-click is specified to request the same
+toggle. Purging continues to use explicit volatile zeroization.
+
 Use `--simulate --wrist-sweep` to exercise orientation and pointing logic with
 deterministic synthetic yaw/pitch samples. This does not create or alter tracks.
 
@@ -651,12 +688,12 @@ state every 250 ms and the grid every 500 ms.
 
 ## Recording format
 
-Sessions are little-endian and versioned. The current writer emits version 8;
+Sessions are little-endian and versioned. The current writer emits version 10;
 versions 1-7 are rejected with an explanation because their records predate
 the current coordinate, sensor, map, wall-pad, or wrist-orientation profile.
 The file structure is:
 
-- **File header (64 bytes):** magic `SADASESS`, version `8`, header size `64`,
+- **File header (64 bytes):** magic `SADASESS`, version `10`, header size `64`,
   endian marker `0x01020304`, creation time in Unix milliseconds, then reserved
   zero padding.
 - **Record header (16 bytes):** `uint32 type`, `uint32 payload_size`,
@@ -683,7 +720,7 @@ Record types:
 | 11 | LiDAR | Surface scan points and burst lifecycle |
 | 12 | ToF | Surface-ray frame |
 | 13 | Wallpad | 1D/sector presence zone |
-| 14 | WristOrientation | Wearable yaw/pitch sample |
+| 14 | WristOrientation | Wearable yaw/pitch, glove state, and button events |
 
 Only raw sensor records (including marker and wrist-orientation observations,
 wall-pad sectors, and schematic records) are replay inputs. Track and world

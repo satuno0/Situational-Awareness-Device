@@ -58,7 +58,17 @@ formats unless the user explicitly requests it.
   newline-delimited `WRIST,<yaw_deg>,<pitch_deg>`; outbound haptic commands
   are `HAPTIC,<duty_pct>,<freq_hz>,<pattern>`. Startup yaw zero is straight
   ahead (+Y). Haptic labels remain strictly `SAFE_TAGGED`, `UNKNOWN_PERSON`,
-  and `PRESENCE_ONLY`; no threat labels.
+  and `PRESENCE_ONLY`; no threat labels. A debounced physical wrist button
+  toggles hand-scan; two local clicks confirm arm and one soft click confirms
+  disarm. The optional 10-byte `0x5B` glove packet keeps its wire layout and is
+  additive to the existing ASCII bridge; `btn_mask` bit 0 carries the debounced
+  button state. The XIAO IMU and DRV2605L share D4/SDA and D5/SCL at 400 kHz;
+  MCU firmware uses fixed buffers and no dynamic heap allocation. The added
+  switches use GPIO 3, 4, 5, and 21; BTN_1 double-click calibrates heading,
+  BTN_2 double-click toggles breadcrumbs, and BTN_3 hold sends panic wipe.
+  Packet reserved bits carry one-shot events without changing packet size.
+  USB Serial is used by the firmware scaffold; do not replace the existing
+  BLE-UART text bridge or enable ESP-NOW without an explicitly configured peer.
 - **Audio:** paired Bluetooth earbuds; no wired I2S DAC/amplifier circuit.
 - **Optional non-blocking external serial bridges:** unplugged devices must
   degrade gracefully. DWM3000 (`--uwb`) sends
@@ -93,6 +103,17 @@ formats unless the user explicitly requests it.
 - LibreVNA wall-pad sectors follow the same confirmation-only policy: consume
   validated `PresenceZone` records, and let fusion reinforce only an existing
   occluded track whose uncertainty overlaps the sector.
+- Glove ray haptics are limited to visible tracks with direct line of sight.
+  Mapped walls and occupied LiDAR/ToF cells block a lock, allowing only the
+  configured 0.15 m surface tolerance. Never lock, tap for, or render an
+  individual behind-wall target; retain sector-only `PresenceZone` evidence.
+- Breadcrumb recording starts enabled. Disabling it pauses writes and preserves
+  points; only explicit purge/wipe paths clear the buffer, using volatile
+  zeroization.
+- The wrist firmware reports impact/button events, zero-heading calibration,
+  breadcrumb toggle, and panic wipe through the additive packet fields. Panic
+  wipe clears breadcrumbs and emits a data-free black HUD frame bound only to
+  the existing loopback command hub.
 
 Prefer the smallest focused change that preserves these contracts. Update
 directly related tests and documentation, and run the relevant CMake build and

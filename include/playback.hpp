@@ -71,6 +71,7 @@ private:
     std::string error_;
     std::string schematic_text_;
     std::uint32_t header_size_ = 64;
+    std::uint32_t format_version_ = 0;
     bool eof_ = false;
 };
 

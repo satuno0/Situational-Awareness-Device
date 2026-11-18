@@ -12,7 +12,8 @@ namespace sa {
 enum class HubCommandType : uint8_t
 {
     TrailToggle,
-    TrailPurge
+    TrailPurge,
+    PanicWipe
 };
 
 struct HubCommand
@@ -20,6 +21,14 @@ struct HubCommand
     HubCommandType type = HubCommandType::TrailPurge;
     bool enabled = false;
 };
+
+class BreadcrumbNavigator;
+bool applyHubCommand(const HubCommand& command,
+                    BreadcrumbNavigator& navigator,
+                    const Pose2D& pose,
+                    uint64_t timestamp_ms,
+                    bool& blackout,
+                    std::string& error);
 
 class HubServer
 {

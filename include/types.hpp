@@ -232,6 +232,10 @@ struct WristOrientation
     uint64_t timestamp_ms = 0;
     float wrist_yaw_deg = 0.0f;
     float wrist_pitch_deg = 0.0f;
+    bool glove_packet = false;
+    bool pointing_active = false;
+    bool zero_heading_requested = false;
+    uint8_t glove_events = 0;
 };
 
 struct SensorFrame

@@ -22,6 +22,7 @@ set(SA_CORE_SOURCES
     src/emcon_controller.cpp
     src/fusion_engine.cpp
     src/gpio_line.cpp
+    src/glove_raycaster.cpp
     src/haptics.cpp
     src/hub_server.cpp
     src/imu_driver.cpp

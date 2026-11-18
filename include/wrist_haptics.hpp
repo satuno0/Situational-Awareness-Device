@@ -1,8 +1,10 @@
 #pragma once
 
+#include "glove_raycaster.hpp"
 #include "serial_port.hpp"
 #include "types.hpp"
 
+#include <array>
 #include <cstdint>
 #include <condition_variable>
 #include <fstream>
@@ -135,6 +137,8 @@ public:
                             const std::optional<WristOrientation>& orientation,
                             uint64_t timestamp_ms,
                             bool collision_warning = false);
+    const GloveRayState& gloveRayState() const { return glove_ray_state_; }
+    void disableGloveScan();
     void reset();
 
     static bool parseOrientationLine(const std::string& line,
@@ -153,6 +157,10 @@ private:
     bool calibrated_ = false;
     float calibrated_yaw_offset_deg_ = 0.0f;
     WristHapticState last_state_{};
+    GloveRaycaster glove_raycaster_;
+    GloveRayState glove_ray_state_{};
+    std::array<uint8_t, 10> glove_packet_buffer_{};
+    std::size_t glove_packet_bytes_ = 0;
 
     std::mutex output_mutex_;
     std::condition_variable output_ready_;

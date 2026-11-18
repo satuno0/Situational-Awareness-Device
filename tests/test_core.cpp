@@ -1411,6 +1411,10 @@ void testWristOrientationRecordingReplay()
     frame.frame_id = 5;
     frame.timestamp_ms = 2800;
     frame.wrist_orientation = WristOrientation{2795, 37.5f, -12.0f};
+    frame.wrist_orientation->glove_packet = true;
+    frame.wrist_orientation->pointing_active = true;
+    frame.wrist_orientation->zero_heading_requested = true;
+    frame.wrist_orientation->glove_events = 0x0C;
     RecorderConfig recorder_config;
     recorder_config.write_world_snapshots = false;
     recorder_config.write_track_snapshots = false;
@@ -1432,6 +1436,9 @@ void testWristOrientationRecordingReplay()
                   near(orientation.wrist_yaw_deg, 37.5f, 1.0e-5f) &&
                   near(orientation.wrist_pitch_deg, -12.0f, 1.0e-5f),
               "wrist orientation replay preserves timestamp, yaw, and pitch");
+        check(orientation.glove_packet && orientation.pointing_active &&
+                  orientation.zero_heading_requested && orientation.glove_events == 0x0C,
+              "glove trigger and zero-heading flags are preserved through replay");
     }
     playback.close();
     std::remove(path.c_str());

@@ -9,7 +9,7 @@
 
 namespace sa {
 
-constexpr uint32_t kSessionFormatVersion = 8;
+constexpr uint32_t kSessionFormatVersion = 10;
 
 class BinaryWriter
 {

@@ -57,54 +57,54 @@ bool Playback::open(const std::string& path, std::string& error)
     }
     if (version == 1)
     {
-        error = "session format v1 uses the legacy coordinate frame and cannot be replayed; record a new v8 session";
+        error = "session format v1 uses the legacy coordinate frame and cannot be replayed; record a new session";
         close();
         error_ = error;
         return false;
     }
     if (version == 2)
     {
-        error = "session format v2 predates LiDAR records and cannot be replayed; record a new v8 session";
+        error = "session format v2 predates LiDAR records and cannot be replayed; record a new session";
         close();
         error_ = error;
         return false;
     }
     if (version == 3)
     {
-        error = "session format v3 predates ToF records and cannot be replayed; record a new v8 session";
+        error = "session format v3 predates ToF records and cannot be replayed; record a new session";
         close();
         error_ = error;
         return false;
     }
     if (version == 4)
     {
-        error = "session format v4 predates scan-burst and fixed-anchor fields; record a new v8 session";
+        error = "session format v4 predates scan-burst and fixed-anchor fields; record a new session";
         close();
         error_ = error;
         return false;
     }
     if (version == 5)
     {
-        error = "session format v5 uses the smaller occupancy-grid profile; record a new v8 session";
+        error = "session format v5 uses the smaller occupancy-grid profile; record a new session";
         close();
         error_ = error;
         return false;
     }
     if (version == 6)
     {
-        error = "session format v6 predates wall-pad presence records; record a new v8 session";
+        error = "session format v6 predates wall-pad presence records; record a new session";
         close();
         error_ = error;
         return false;
     }
     if (version == 7)
     {
-        error = "session format v7 predates wrist orientation records; record a new v8 session";
+        error = "session format v7 predates wrist orientation records; record a new session";
         close();
         error_ = error;
         return false;
     }
-    if (version != kSessionFormatVersion)
+    if (version != 8 && version != 9 && version != kSessionFormatVersion)
     {
         error = "unsupported session format version " + std::to_string(version);
         close();
@@ -112,6 +112,7 @@ bool Playback::open(const std::string& path, std::string& error)
         return false;
     }
     header_size_ = header_size;
+    format_version_ = version;
     file_.clear();
     file_.seekg(static_cast<std::streamoff>(header_size_), std::ios::beg);
     if (!file_)
@@ -413,6 +414,14 @@ bool Playback::next(PlaybackFrame& frame)
             orientation.timestamp_ms = frame_timestamp;
             orientation.wrist_yaw_deg = reader.f32();
             orientation.wrist_pitch_deg = reader.f32();
+            if (format_version_ >= 9)
+            {
+                orientation.glove_packet = reader.u8() != 0;
+                orientation.pointing_active = reader.u8() != 0;
+                orientation.zero_heading_requested = reader.u8() != 0;
+            }
+            if (format_version_ >= 10)
+                orientation.glove_events = reader.u8();
             if (!reader.ok()) continue;
             frame.sensors.wrist_orientation = orientation;
             saw_sensor = true;

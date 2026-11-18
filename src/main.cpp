@@ -1,6 +1,8 @@
 #include "announcer.hpp"
+#include "breadcrumb_navigator.hpp"
 #include "desktop_camera.hpp"
 #include "fusion_engine.hpp"
+#include "hub_server.hpp"
 #include "haptics.hpp"
 #include "imu_driver.hpp"
 #include "lidar_driver.hpp"
@@ -973,9 +975,13 @@ struct RuntimeContext
     WristGuidance guidance;
     WristVibrator vibrator;
     WristHaptics wrist_haptics;
+    BreadcrumbNavigator breadcrumbs;
+    HubServer hub_server;
     Announcer announcer;
     Schematic schematic;
     std::string schematic_text;
+    bool hub_server_ok = false;
+    bool hub_blackout = false;
 };
 
 bool startTelemetry(const Options& options, Telemetry& telemetry)
@@ -988,6 +994,18 @@ bool startTelemetry(const Options& options, Telemetry& telemetry)
     }
     std::cout << "[sa] telemetry http://" << options.bind_address << ":" << telemetry.port()
               << " (JSON: /api/state, /api/grid)\n";
+    return true;
+}
+
+bool startHubServer(RuntimeContext& runtime)
+{
+    std::string error;
+    if (!runtime.hub_server.start(error))
+    {
+        std::cerr << "[sa] command hub warning: " << error << "\n";
+        return false;
+    }
+    std::cout << "[sa] command hub UDP 127.0.0.1:8765\n";
     return true;
 }
 
@@ -1114,15 +1132,83 @@ void publishAll(const WorldModel& world, const SensorFrame& frame, Telemetry& te
                 bool telemetry_enabled, RuntimeContext& runtime,
                 bool scan_available = false, bool scan_active = false)
 {
+    if (!runtime.breadcrumbs.update(world.pose, frame.timestamp_ms))
+        std::cerr << "[sa] breadcrumb update rejected an invalid or stale pose\n";
+
+    const auto apply_command = [&runtime, &world, &frame](const HubCommand& command) {
+        if (command.type == HubCommandType::PanicWipe)
+            runtime.wrist_haptics.disableGloveScan();
+        std::string command_error;
+        if (!applyHubCommand(command, runtime.breadcrumbs, world.pose, frame.timestamp_ms,
+                             runtime.hub_blackout, command_error))
+            std::cerr << "[sa] command hub request rejected: " << command_error << "\n";
+    };
+    if (frame.wrist_orientation && frame.wrist_orientation->glove_packet)
+    {
+        const uint8_t events = frame.wrist_orientation->glove_events;
+        if ((events & kGloveEventPanicWipe) != 0)
+            apply_command({HubCommandType::PanicWipe, false});
+        else if ((events & kGloveEventTrailToggle) != 0)
+            apply_command({HubCommandType::TrailToggle, !runtime.breadcrumbs.enabled()});
+    }
+
     haptics.update(world, frame.ultrasonic ? &*frame.ultrasonic : nullptr);
     const auto collision_range = closeRangeCollisionRange(
         world, frame.ultrasonic ? &*frame.ultrasonic : nullptr);
     runtime.wrist_haptics.update(world, frame.wrist_orientation, frame.timestamp_ms,
                                  collision_range.has_value());
+
     runtime.markers.observe(frame);
     const WristState wrist = runtime.guidance.update(runtime.markers.latest, frame.timestamp_ms);
     runtime.vibrator.update(frame.timestamp_ms, wrist.aimed);
     runtime.announcer.update(world, frame.timestamp_ms);
+
+    if (runtime.hub_server_ok)
+    {
+        HudRenderFrame hud{};
+        hud.pose = world.pose;
+        hud.return_heading_deg = runtime.breadcrumbs.returnHeadingDeg(world.pose);
+        hud.trail_enabled = runtime.breadcrumbs.enabled();
+        hud.blackout = runtime.hub_blackout;
+        hud.has_glove_ray = true;
+        const GloveRayState& ray = runtime.wrist_haptics.gloveRayState();
+        hud.glove_ray = {ray.active, ray.yaw_deg, ray.locked_target_id, ray.locked_dist_m};
+
+        for (const MapWall& wall : world.walls)
+        {
+            if (hud.wall_count == hud.walls.size()) break;
+            hud.walls[hud.wall_count++] = {
+                wall.start.x, wall.start.y, wall.end.x, wall.end.y
+            };
+        }
+        for (const Track& track : world.tracks)
+        {
+            if (!track.visible || track.state != TrackState::VISIBLE ||
+                hud.target_count == hud.targets.size())
+                continue;
+            const Vec3 position = track.filter.position();
+            const Vec3 velocity = track.filter.velocity();
+            hud.targets[hud.target_count++] = {
+                position.x, position.y, velocity.x, velocity.y,
+                track.existence_confidence, HudTargetSource::Mmwave
+            };
+        }
+        for (const PresenceZone& zone : world.zones)
+        {
+            if (hud.presence_zone_count == hud.presence_zones.size()) break;
+            hud.presence_zones[hud.presence_zone_count++] = zone;
+        }
+        const auto points = runtime.breadcrumbs.breadcrumbs();
+        hud.breadcrumb_count = std::min(points.size(), hud.breadcrumb_path.size());
+        std::copy_n(points.begin(), hud.breadcrumb_count, hud.breadcrumb_path.begin());
+
+        std::string hub_error;
+        if (!runtime.hub_server.service(frame.timestamp_ms, hud, hub_error))
+            std::cerr << "[sa] command hub service error: " << hub_error << "\n";
+        HubCommand command{};
+        while (runtime.hub_server.takeCommand(command)) apply_command(command);
+    }
+
     if (telemetry_enabled)
     {
         telemetry.publish(world, runtime.markers.latest,
@@ -1728,6 +1814,7 @@ int main(int argc, char** argv)
 
     const WristConfig wrist_config = wristConfig(options);
     RuntimeContext runtime(wrist_config, announceConfig(options));
+    if (!options.desktop_demo) runtime.hub_server_ok = startHubServer(runtime);
     if (!options.desktop_demo) startWrist(runtime, options);
     const bool announcer_ok = startAnnouncer(runtime.announcer, options);
 
@@ -1744,6 +1831,7 @@ int main(int argc, char** argv)
         result = runHardware(options, telemetry, haptics, telemetry_ok, runtime);
 
     runtime.vibrator.stop();
+    runtime.hub_server.stop();
     runtime.announcer.stop();
     haptics.stop();
     telemetry.stop();

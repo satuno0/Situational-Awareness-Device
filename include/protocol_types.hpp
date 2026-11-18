@@ -46,6 +46,14 @@ struct HudPoint
     float y = 0.0f;
 };
 
+struct HudGloveRay
+{
+    bool active = false;
+    float yaw_deg = 0.0f;
+    uint32_t locked_target_id = 0;
+    float locked_dist_m = 0.0f;
+};
+
 struct HudRenderFrame
 {
     Pose2D pose{0.0f, 0.0f, 0.0f};
@@ -62,6 +70,9 @@ struct HudRenderFrame
     bool trail_enabled = false;
     bool auto_mode = false;
     bool declutter = false;
+    bool blackout = false;
+    bool has_glove_ray = false;
+    HudGloveRay glove_ray{};
     std::array<char, kHudAnnouncementBytes> announcement{};
 };
 

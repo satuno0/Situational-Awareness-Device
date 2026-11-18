@@ -185,6 +185,10 @@ bool Recorder::writeWristOrientationRecord(const WristOrientation& orientation, 
     writer.u64(orientation.timestamp_ms);
     writer.f32(orientation.wrist_yaw_deg);
     writer.f32(orientation.wrist_pitch_deg);
+    writer.u8(orientation.glove_packet ? 1 : 0);
+    writer.u8(orientation.pointing_active ? 1 : 0);
+    writer.u8(orientation.zero_heading_requested ? 1 : 0);
+    writer.u8(orientation.glove_events);
     return writeRecord(RecordType::WristOrientation, writer.data());
 }
 

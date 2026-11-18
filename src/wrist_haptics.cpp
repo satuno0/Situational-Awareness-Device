@@ -219,15 +219,25 @@ void WristHaptics::stop()
     }
     module_.close();
     line_buffer_.clear();
+    glove_packet_bytes_ = 0;
 }
 
 void WristHaptics::reset()
 {
     line_buffer_.clear();
+    glove_packet_bytes_ = 0;
     latest_orientation_.reset();
     calibrated_ = false;
     calibrated_yaw_offset_deg_ = config_.wrist_yaw_offset_deg;
     last_state_ = WristHapticState{};
+    glove_raycaster_.reset();
+    glove_ray_state_ = GloveRayState{};
+}
+
+void WristHaptics::disableGloveScan()
+{
+    glove_raycaster_.disableScan();
+    glove_ray_state_ = GloveRayState{};
 }
 
 bool WristHaptics::parseOrientationLine(const std::string& line,
@@ -269,6 +279,34 @@ bool WristHaptics::poll(uint64_t timestamp_ms, WristOrientation& orientation, st
     std::string parse_error;
     for (const uint8_t byte : bytes)
     {
+        if (glove_packet_bytes_ > 0 || byte == 0x5B)
+        {
+            glove_packet_buffer_[glove_packet_bytes_++] = byte;
+            if (glove_packet_bytes_ == glove_packet_buffer_.size())
+            {
+                GlovePosePacket packet{};
+                if (parseGlovePosePacket(glove_packet_buffer_.data(),
+                                         glove_packet_buffer_.size(),
+                                         packet, parse_error))
+                {
+                    WristOrientation sample{};
+                    sample.timestamp_ms = timestamp_ms;
+                    sample.wrist_yaw_deg = packet.yaw_deg;
+                    sample.wrist_pitch_deg = packet.pitch_deg;
+                    sample.glove_packet = true;
+                    sample.pointing_active = packet.trigger_held;
+                    sample.zero_heading_requested = packet.zero_heading_requested;
+                    sample.glove_events = packet.events;
+                    orientation = sample;
+                    latest_orientation_ = sample;
+                    received = true;
+                    parse_error.clear();
+                }
+                glove_packet_bytes_ = 0;
+            }
+            continue;
+        }
+
         if (byte == '\n')
         {
             const std::string line = trim(line_buffer_);
@@ -326,11 +364,55 @@ WristHapticState WristHaptics::update(const WorldModel& world,
         state.wrist_pitch_deg = latest_orientation_->wrist_pitch_deg;
     }
 
+    std::optional<GlovePosePacket> new_glove_packet;
+    if (orientation && orientation->glove_packet)
+    {
+        GlovePosePacket packet{};
+        packet.yaw_deg = orientation->wrist_yaw_deg;
+        packet.pitch_deg = orientation->wrist_pitch_deg;
+        packet.trigger_held = orientation->pointing_active;
+        packet.zero_heading_requested = orientation->zero_heading_requested;
+        new_glove_packet = packet;
+    }
+    glove_ray_state_ = glove_raycaster_.update(world, new_glove_packet, timestamp_ms);
+
     if (collision_warning)
     {
         state.pattern = WristHapticPattern::COLLISION;
         state.duty_pct = 100.0f;
         state.frequency_hz = 20.0f;
+    }
+    else if (orientation_fresh && latest_orientation_->glove_packet)
+    {
+        if (glove_ray_state_.active && glove_ray_state_.locked_target_id != 0)
+        {
+            const auto target = std::find_if(
+                world.tracks.begin(), world.tracks.end(),
+                [this](const Track& track) {
+                    return track.id == glove_ray_state_.locked_target_id;
+                });
+            if (target != world.tracks.end())
+            {
+                state.pointing = true;
+                state.wrist_yaw_deg = wrapDeg(glove_ray_state_.yaw_deg - world.pose.yaw_deg);
+                state.target_bearing_deg = state.wrist_yaw_deg;
+                state.target_range_m = glove_ray_state_.locked_dist_m;
+                const PersonClass person_class = classifyTrack(*target);
+                if (person_class == PersonClass::SAFE_TAGGED)
+                {
+                    state.pattern = WristHapticPattern::SAFE_TAGGED;
+                    state.duty_pct = 22.0f;
+                    state.frequency_hz = 4.0f;
+                }
+                else
+                {
+                    state.pattern = WristHapticPattern::UNKNOWN_PERSON;
+                    state.frequency_hz = clampf(16.0f - glove_ray_state_.locked_dist_m, 4.0f, 16.0f);
+                    state.duty_pct = clampf(50.0f + 5.0f * (8.0f - glove_ray_state_.locked_dist_m),
+                                            40.0f, 90.0f);
+                }
+            }
+        }
     }
     else if (state.orientation_valid && config_.enabled)
     {

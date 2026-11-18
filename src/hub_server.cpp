@@ -1,5 +1,7 @@
 #include "hub_server.hpp"
 
+#include "breadcrumb_navigator.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -85,6 +87,12 @@ bool finiteFrame(const HudRenderFrame& frame)
         frame.breadcrumb_count > frame.breadcrumb_path.size() ||
         !std::isfinite(frame.pose.x) || !std::isfinite(frame.pose.y) ||
         !std::isfinite(frame.pose.yaw_deg) || !std::isfinite(frame.return_heading_deg))
+        return false;
+    if (frame.has_glove_ray &&
+        (!std::isfinite(frame.glove_ray.yaw_deg) ||
+         !std::isfinite(frame.glove_ray.locked_dist_m) ||
+         frame.glove_ray.locked_dist_m < 0.0f ||
+         (frame.glove_ray.locked_target_id == 0 && frame.glove_ray.locked_dist_m != 0.0f)))
         return false;
 
     for (std::size_t i = 0; i < frame.wall_count; ++i)
@@ -285,6 +293,40 @@ bool HubServer::parseCommand(const char* data, std::size_t size, HubCommand& com
         command = {HubCommandType::TrailToggle, false};
         return true;
     }
+    if (text == "{\"cmd\":\"panic_wipe\"}")
+    {
+        command = {HubCommandType::PanicWipe, false};
+        return true;
+    }
+    return false;
+}
+
+bool applyHubCommand(const HubCommand& command,
+                     BreadcrumbNavigator& navigator,
+                     const Pose2D& pose,
+                     uint64_t timestamp_ms,
+                     bool& blackout,
+                     std::string& error)
+{
+    error.clear();
+    switch (command.type)
+    {
+    case HubCommandType::TrailToggle:
+        if (!navigator.setEnabled(command.enabled, pose, timestamp_ms))
+        {
+            error = "cannot change breadcrumb recording without a valid pose";
+            return false;
+        }
+        return true;
+    case HubCommandType::TrailPurge:
+        navigator.purge();
+        return true;
+    case HubCommandType::PanicWipe:
+        navigator.purge();
+        blackout = true;
+        return true;
+    }
+    error = "unsupported hub command";
     return false;
 }
 
@@ -368,6 +410,26 @@ bool HubServer::serializeFrame(const HudRenderFrame& frame,
         error = "HUD output buffer is invalid";
         return false;
     }
+    if (frame.blackout)
+    {
+        constexpr char kBlackoutFrame[] =
+            "{\"background\":\"#000000\",\"foreground\":\"#000000\","
+            "\"declutter\":true,\"pose\":{\"x\":0.000,\"y\":0.000,"
+            "\"heading_deg\":0.000,\"floor\":0},\"walls\":[],\"targets\":[],"
+            "\"presence_zones\":[],\"breadcrumb_path\":[],\"return_heading_deg\":0.000,"
+            "\"trail_enabled\":false,\"status\":{\"emcon_mode\":\"MANUAL\","
+            "\"tts_alert\":\"\"},\"blackout\":true}";
+        constexpr std::size_t kBlackoutFrameSize = sizeof(kBlackoutFrame) - 1;
+        if (capacity <= kBlackoutFrameSize)
+        {
+            error = "HUD frame exceeds the fixed output buffer";
+            return false;
+        }
+        std::memcpy(output, kBlackoutFrame, sizeof(kBlackoutFrame));
+        written = kBlackoutFrameSize;
+        return true;
+    }
+
     if (!finiteFrame(frame))
     {
         error = "HUD frame contains invalid fields";
@@ -441,7 +503,19 @@ bool HubServer::serializeFrame(const HudRenderFrame& frame,
         goto overflow;
     if (!appendJsonString(output, capacity, used, frame.announcement.data()))
         goto overflow;
-    if (!appendFormat(output, capacity, used, "}}"))
+    if (frame.has_glove_ray)
+    {
+        if (!appendFormat(output, capacity, used,
+                          "},\"glove_ray\":{\"active\":%s,\"yaw_deg\":%.3f,"
+                          "\"locked_target_id\":%u,\"locked_dist_m\":%.3f},"
+                          "\"blackout\":false}",
+                          frame.glove_ray.active ? "true" : "false",
+                          frame.glove_ray.yaw_deg,
+                          frame.glove_ray.locked_target_id,
+                          frame.glove_ray.locked_dist_m))
+            goto overflow;
+    }
+    else if (!appendFormat(output, capacity, used, "},\"blackout\":false}"))
         goto overflow;
     written = used;
     return true;

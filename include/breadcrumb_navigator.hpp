@@ -30,10 +30,11 @@ private:
     void clearWaypoints();
 
     std::array<HudPoint, kMaxWaypoints> waypoints_{};
+    HudPoint sample_anchor_{};
     std::size_t count_ = 0;
     uint64_t last_timestamp_ms_ = 0;
     bool has_timestamp_ = false;
-    bool enabled_ = false;
+    bool enabled_ = true;
 };
 
 } // namespace sa
