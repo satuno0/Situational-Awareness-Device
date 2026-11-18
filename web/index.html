@@ -170,6 +170,9 @@
         <h2>360° surface scan</h2>
         <div class="scan-row">
           <div class="scan-status" id="scanStatus">LIDAR UNAVAILABLE</div>
+          <button id="scanOnDemand" type="button">On-demand mode</button>
+          <button id="scanAuto" type="button">Auto mode (every 5s)</button>
+          <button id="scanContinuous" type="button">Continuous mode</button>
           <button id="scanTrigger" disabled>360° Scan Burst (1.5s)</button>
         </div>
       </section>
@@ -532,11 +535,21 @@
     const scan = state.scan_burst || {};
     const scanStatus = document.getElementById("scanStatus");
     const scanButton = document.getElementById("scanTrigger");
+    const scanOnDemand = document.getElementById("scanOnDemand");
+    const scanAuto = document.getElementById("scanAuto");
+    const scanContinuous = document.getElementById("scanContinuous");
+    const scanMode = scan.mode || "on_demand";
     const scanLabel = !scan.available ? "LIDAR UNAVAILABLE"
-      : scan.active ? "360° SCANNING..." : "SILENT PATROL (0 dBA)";
+      : scanMode === "continuous" ? "CONTINUOUS · MOTOR ON"
+      : scanMode === "auto" && scan.active ? "AUTO · 360° SCANNING..."
+      : scanMode === "auto" ? "AUTO · BURST EVERY 5 SECONDS"
+      : scan.active ? "ON-DEMAND · 360° SCANNING..." : "ON-DEMAND · MOTOR OFF";
     scanStatus.textContent = scanLabel;
     scanStatus.className = "scan-status" + (scan.active ? " active" : "");
-    scanButton.disabled = !scan.available || scan.active;
+    scanButton.disabled = !scan.available || scan.active || scanMode !== "on_demand";
+    scanOnDemand.disabled = !scan.available || scanMode === "on_demand";
+    scanAuto.disabled = !scan.available || scanMode === "auto";
+    scanContinuous.disabled = !scan.available || scanMode === "continuous";
 
     const marker = state.marker || {};
     const wrist = state.wrist || {};
@@ -673,6 +686,31 @@
     } catch (error) {
       status.textContent = "REQUEST FAILED: " + error.message;
     }
+  });
+
+  async function setLidarMode(command, statusText) {
+    const status = document.getElementById("scanStatus");
+    status.textContent = statusText;
+    try {
+      const response = await fetch("/api/command", {
+        method: "POST",
+        headers: { "Content-Type": "text/plain" },
+        body: command
+      });
+      const reply = await response.text();
+      if (!response.ok) status.textContent = "REJECTED: " + reply.trim();
+    } catch (error) {
+      status.textContent = "REQUEST FAILED: " + error.message;
+    }
+  }
+  document.getElementById("scanOnDemand").addEventListener("click", () => {
+    setLidarMode("CMD:LIDAR_ON_DEMAND", "SWITCHING TO ON-DEMAND...");
+  });
+  document.getElementById("scanAuto").addEventListener("click", () => {
+    setLidarMode("CMD:LIDAR_AUTO", "SWITCHING TO AUTO...");
+  });
+  document.getElementById("scanContinuous").addEventListener("click", () => {
+    setLidarMode("CMD:LIDAR_CONTINUOUS", "SWITCHING TO CONTINUOUS...");
   });
 
   window.addEventListener("resize", resize);

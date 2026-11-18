@@ -51,8 +51,11 @@ it as the sole means of avoiding injury.
 - C++20 compiler (GCC 11+, Clang 13+, or MSVC 19.30+)
 - CMake 3.20+ (optional; direct compiler commands are documented below)
 - POSIX threads on Linux
-- No external runtime libraries; the ST VL53L8CX ULD and BSD-3-Clause license
-  are included under `third_party/st_vl53l8cx`
+- Optional Linux hardware HAL GPIO support requires libgpiod 1.x; without it,
+  the rest of the project still builds and the HAL reports that GPIO hardware
+  is unavailable.
+- No external runtime libraries for the core; the ST VL53L8CX ULD and
+  BSD-3-Clause license are included under `third_party/st_vl53l8cx`
 
 ## Repository layout
 
@@ -69,6 +72,7 @@ include/                 Public interfaces and core data types
   lidar_driver.hpp       On-demand LD19 / ASCII LiDAR scan-burst driver
   tof_driver.hpp         Dual VL53L8CX ULD driver and 3D zone projection
   gpio_line.hpp          Linux GPIO character-device line helper
+  hal_pinout.hpp         Hip-module pinout, EMCON, ToF sequencing, async I2C API
   imu_driver.hpp         ICM-42688 I2C driver + attitude estimator
   uwb_driver.hpp         DWM3000 serial-bridge driver
   novelda_driver.hpp     XeThru/Novelda serial-bridge driver
@@ -420,12 +424,34 @@ haptics worker.
 
 ## Surface sensors
 
-The dual VL53L8CX arrays use 8x8 multi-zone ranging at up to 4 m. Each device
-needs its own active-high XSHUT line so the driver can assign distinct I2C
-addresses at startup. The default bus, GPIO lines, sensor yaw, and pitch are
-configurable; measure the actual mounting pose before using the map. I2C work
-runs on the driver worker, and completed rays are timestamped before entering
-the deterministic fusion/replay pipeline.
+### Core-SA hip-module hardware HAL
+
+`include/hal_pinout.hpp` records the hip-module schematic pinout. Its Linux HAL
+uses `/dev/i2c-1` (400 kHz configured by the board's I2C controller/device
+tree), with TMP117 `0x48`, ICM-42688-P `0x68`, and ToF addresses `0x30`/`0x29`.
+`FrontTofPodControl` holds GPIO11 low, calls the sensor-specific S3 address
+setter to move `0x29` to `0x30`, then releases GPIO11 so S4 starts at `0x29`;
+the setter should use the sensor vendor driver on the I2C worker.
+`AsyncI2cBus` keeps transfers off the caller thread, requests a 25 ms adapter
+timeout with retries disabled, reports each transaction result, and closes a
+failed bus descriptor so a later request can reopen it after unplug/replug.
+The sensor driver must reapply its device configuration after reconnecting.
+
+`EmconHardware` requests GPIO13, GPIO16, and GPIO18 with internal pull-ups and
+starts GPIO15 low. The physical switch alone selects continuous AUTO power;
+MANUAL button presses pulse the gate for 500 ms, while an AUTO double-click
+reports a five-minute advisory snooze. Lid-open callbacks synchronously invoke
+the application-provided RAM zeroizer and LUKS-key dropper; both callbacks are
+mandatory. The host must poll the interlock regularly. Board 2 packet magic,
+sizes, USB path, baud rate, and GPIO07/08 are constants in the pinout header.
+Telemetry configuration is unchanged and remains bound to `127.0.0.1:8765`.
+
+The existing daemon dual-VL53L8CX profile uses 8x8 multi-zone ranging at up to
+4 m. Each device needs its own active-high XSHUT line so the driver can assign
+distinct I2C addresses at startup. The default bus, GPIO lines, sensor yaw, and
+pitch are configurable; measure the actual mounting pose before using the map.
+I2C work runs on the driver worker, and completed rays are timestamped before
+entering the deterministic fusion/replay pipeline.
 
 The LD19 is optional and normally unpowered. The default GPIO gate is active
 high and must control the TPS22965 high-side load switch, not the motor
@@ -433,9 +459,14 @@ directly. The default UART is `/dev/ttyS2` at 230400 baud; disable its Linux
 debug console. Physical pin 10 is UART2 RX and `/dev/gpiochip3` line 12
 (physical pin 31) is the active-high gate.
 An active localhost client can request a 1.5-second burst with the dashboard
-button. The first 300 ms are discarded for spin-up; retriggers during a burst
-are ignored. Verify the LD19 packet/CRC and GPIO polarity on the target Linux
-hardware before relying on this path.
+button while in on-demand mode. The dashboard can also select Auto mode, which
+starts a 1.5-second burst immediately and repeats every 5 seconds; the motor is
+off between bursts. Continuous mode keeps the motor powered and streams scan
+points into mapping until another mode is selected or the daemon exits. The
+motor gate remains off at startup. The first 300 ms after powering on are
+discarded for spin-up, and retriggers during a burst are ignored. Verify the
+LD19 packet/CRC and GPIO polarity on the target Linux hardware before relying on
+these modes.
 
 ## Red-marker wrist guidance
 

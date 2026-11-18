@@ -14,6 +14,14 @@ namespace sa {
 
 constexpr uint64_t kLidarSpinupDiscardMs = 300;
 constexpr float kDefaultLidarBurstDurationSec = 1.5f;
+constexpr uint64_t kDefaultLidarAutoIntervalMs = 5000;
+
+enum class LidarScanMode
+{
+    OnDemand,
+    Auto,
+    Continuous
+};
 
 struct LidarConfig
 {
@@ -42,7 +50,15 @@ public:
 
     bool triggerScanBurst(uint64_t timestamp_ms, float duration_sec = kDefaultLidarBurstDurationSec);
     bool triggerScanBurst(uint64_t timestamp_ms, float duration_sec, std::string& error);
+    bool setMode(LidarScanMode mode, uint64_t timestamp_ms, std::string& error);
+    LidarScanMode mode() const { return mode_; }
+    bool serviceAutoScan(uint64_t timestamp_ms, std::string& error);
     bool isBurstActive(uint64_t timestamp_ms) const;
+    bool isContinuousActive() const { return continuous_active_; }
+    bool isScanActive(uint64_t timestamp_ms) const
+    {
+        return isBurstActive(timestamp_ms) || isContinuousActive();
+    }
     bool motorPowered() const { return motor_powered_; }
 
     // Collects complete ASCII bridge points or native LD19 packets for one tick.
@@ -68,9 +84,13 @@ private:
     std::vector<uint8_t> input_buffer_;
     uint64_t burst_start_ms_ = 0;
     uint64_t burst_deadline_ms_ = 0;
+    uint64_t next_auto_scan_ms_ = 0;
+    uint64_t continuous_start_ms_ = 0;
     bool burst_active_ = false;
     bool burst_completion_pending_ = false;
     bool motor_powered_ = false;
+    bool continuous_active_ = false;
+    LidarScanMode mode_ = LidarScanMode::OnDemand;
 };
 
 } // namespace sa

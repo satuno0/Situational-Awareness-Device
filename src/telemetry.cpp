@@ -489,7 +489,9 @@ void Telemetry::handleClient(intptr_t raw_socket)
                 return;
             }
             body.resize(content_length);
-            if (trimCopy(body) != "CMD:SCAN_360")
+            const std::string command = trimCopy(body);
+            if (command != "CMD:SCAN_360" && command != "CMD:LIDAR_AUTO" &&
+                command != "CMD:LIDAR_ON_DEMAND" && command != "CMD:LIDAR_CONTINUOUS")
             {
                 sendAll(raw_socket, response("400 Bad Request", "text/plain", "unsupported command\n", false));
                 closeSocket(socket);
@@ -497,9 +499,17 @@ void Telemetry::handleClient(intptr_t raw_socket)
             }
             {
                 std::lock_guard<std::mutex> lock(data_mutex_);
-                scan_burst_command_pending_ = true;
+                if (command == "CMD:SCAN_360")
+                    scan_burst_command_pending_ = true;
+                else
+                    lidar_mode_command_pending_ =
+                        command == "CMD:LIDAR_AUTO" ? "auto" :
+                        command == "CMD:LIDAR_CONTINUOUS" ? "continuous" : "on_demand";
             }
-            sendAll(raw_socket, response("202 Accepted", "text/plain", "360 scan request queued\n", false));
+            const char* reply = command == "CMD:SCAN_360"
+                                    ? "360 scan request queued\n"
+                                    : "LiDAR mode change queued\n";
+            sendAll(raw_socket, response("202 Accepted", "text/plain", reply, false));
             closeSocket(socket);
             return;
         }
@@ -637,7 +647,8 @@ void Telemetry::buildStateJson(const WorldModel& world,
                                const WristTelemetry& wrist,
                                const std::string& announcement,
                                bool scan_available,
-                               bool scan_active)
+                               bool scan_active,
+                               const std::string& scan_mode)
 {
     std::ostringstream out;
     out << "{";
@@ -656,7 +667,8 @@ void Telemetry::buildStateJson(const WorldModel& world,
         << ",\"ultrasonic\":" << (world.health.ultrasonic ? "true" : "false")
         << ",\"score\":" << number(world.health.health_score) << "},";
     out << "\"scan_burst\":{\"available\":" << (scan_available ? "true" : "false")
-        << ",\"active\":" << (scan_active ? "true" : "false") << "},";
+        << ",\"active\":" << (scan_active ? "true" : "false")
+        << ",\"mode\":" << jsonString(scan_mode) << "},";
     out << "\"occupancy\":{\"occupied\":" << world.occupancy.occupiedCellCount()
         << ",\"known\":" << world.occupancy.knownCellCount()
         << ",\"total\":" << world.occupancy.totalCellCount() << "},";
@@ -790,9 +802,10 @@ void Telemetry::publish(const WorldModel& world,
                         const WristTelemetry& wrist,
                         const std::string& announcement,
                         bool scan_available,
-                        bool scan_active)
+                        bool scan_active,
+                        const std::string& scan_mode)
 {
-    buildStateJson(world, marker, wrist, announcement, scan_available, scan_active);
+    buildStateJson(world, marker, wrist, announcement, scan_available, scan_active, scan_mode);
     buildGridJson(world);
 }
 
@@ -811,6 +824,15 @@ bool Telemetry::takeScanBurstCommand()
     std::lock_guard<std::mutex> lock(data_mutex_);
     if (!scan_burst_command_pending_) return false;
     scan_burst_command_pending_ = false;
+    return true;
+}
+
+bool Telemetry::takeLidarModeCommand(std::string& mode)
+{
+    std::lock_guard<std::mutex> lock(data_mutex_);
+    if (!lidar_mode_command_pending_) return false;
+    mode = *lidar_mode_command_pending_;
+    lidar_mode_command_pending_.reset();
     return true;
 }
 

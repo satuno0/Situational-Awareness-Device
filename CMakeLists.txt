@@ -20,6 +20,7 @@ set(SA_CORE_SOURCES
     src/breadcrumb_navigator.cpp
     src/desktop_camera.cpp
     src/emcon_controller.cpp
+    src/emcon_hardware.cpp
     src/fusion_engine.cpp
     src/gpio_line.cpp
     src/glove_raycaster.cpp
@@ -54,6 +55,17 @@ add_library(sa_core STATIC ${SA_CORE_SOURCES})
 target_include_directories(sa_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(sa_core PUBLIC cxx_std_20)
 target_link_libraries(sa_core PUBLIC Threads::Threads vl53l8cx_uld)
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(LIBGPIOD QUIET IMPORTED_TARGET "libgpiod>=1.5" "libgpiod<2")
+        if(LIBGPIOD_FOUND)
+            target_compile_definitions(sa_core PRIVATE SA_HAS_LIBGPIOD=1)
+            target_link_libraries(sa_core PRIVATE PkgConfig::LIBGPIOD)
+        endif()
+    endif()
+endif()
 
 if(MSVC)
     target_compile_options(sa_core PRIVATE /W4 /WX /permissive-)

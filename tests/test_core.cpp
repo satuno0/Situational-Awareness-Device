@@ -922,6 +922,58 @@ void testLidarBurstState()
     check(!lidar.motorPowered() && !lidar.isBurstActive(2500), "deadline automatically cuts scan power");
 }
 
+void testLidarAutoMode()
+{
+    LidarConfig config;
+    config.power_gate_enabled = false;
+    LidarDriver lidar(config);
+    std::string error;
+
+    check(lidar.mode() == LidarScanMode::OnDemand, "LiDAR defaults to on-demand mode");
+    check(lidar.setMode(LidarScanMode::Auto, 1000, error) &&
+              lidar.mode() == LidarScanMode::Auto,
+          "LiDAR can enter auto mode");
+    check(!lidar.serviceAutoScan(999, error),
+          "automatic LiDAR scan waits until its scheduled start");
+    check(lidar.serviceAutoScan(1000, error) && lidar.isBurstActive(1000),
+          "auto mode starts its first burst immediately");
+    check(!lidar.serviceAutoScan(5999, error),
+          "auto mode waits five seconds between burst starts");
+    check(lidar.serviceAutoScan(6000, error) && lidar.isBurstActive(6000),
+          "auto mode starts another burst at the five-second interval");
+
+    check(lidar.setMode(LidarScanMode::OnDemand, 6000, error) &&
+              lidar.mode() == LidarScanMode::OnDemand &&
+              !lidar.serviceAutoScan(11000, error),
+          "on-demand mode stops scheduling automatic bursts");
+}
+
+void testLidarContinuousMode()
+{
+    LidarConfig config;
+    config.power_gate_enabled = false;
+    LidarDriver lidar(config);
+    std::string error;
+    LidarScan scan;
+    const std::string point = "LIDAR,0,1\n";
+
+    check(lidar.setMode(LidarScanMode::Continuous, 1000, error) &&
+              lidar.mode() == LidarScanMode::Continuous &&
+              lidar.isContinuousActive() && lidar.motorPowered(),
+          "continuous mode keeps LiDAR power enabled");
+    check(!lidar.ingestBytes(reinterpret_cast<const uint8_t*>(point.data()), point.size(),
+                             1299, scan, error),
+          "continuous mode discards spin-up samples");
+    check(lidar.ingestBytes(reinterpret_cast<const uint8_t*>(point.data()), point.size(),
+                            1300, scan, error) &&
+              scan.points.size() == 1 && !scan.burst_active,
+          "continuous mode streams mapping points without burst loop-closure state");
+
+    check(lidar.setMode(LidarScanMode::OnDemand, 1400, error) &&
+              !lidar.isContinuousActive() && !lidar.motorPowered(),
+          "leaving continuous mode powers LiDAR down");
+}
+
 void testLidarOwnsMapping()
 {
     SensorFrame frame;
@@ -1651,6 +1703,8 @@ int main()
     testUltrasonicCarriageReturnBridge();
     testLd19PacketParser();
     testLidarBurstState();
+    testLidarAutoMode();
+    testLidarContinuousMode();
     testFinalTofHardwareDefaults();
     testLidarOwnsMapping();
     testTofOwnsMapping();

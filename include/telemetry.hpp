@@ -50,12 +50,14 @@ public:
                  const WristTelemetry& wrist = WristTelemetry{},
                  const std::string& announcement = {},
                  bool scan_available = false,
-                 bool scan_active = false);
+                 bool scan_active = false,
+                 const std::string& scan_mode = "on_demand");
 
     // Takes one pending POST /api/map body. Returns false when none is queued.
     // The caller parses and validates it before replacing the active schematic.
     bool takeMapUpload(std::string& text);
     bool takeScanBurstCommand();
+    bool takeLidarModeCommand(std::string& mode);
 
 private:
     void serverLoop();
@@ -65,7 +67,8 @@ private:
                         const WristTelemetry& wrist,
                         const std::string& announcement,
                         bool scan_available,
-                        bool scan_active);
+                        bool scan_active,
+                        const std::string& scan_mode);
     void buildGridJson(const WorldModel& world);
     std::string response(const std::string& status,
                          const std::string& content_type,
@@ -89,6 +92,7 @@ private:
     std::string pending_map_text_;
     bool has_map_upload_ = false;
     bool scan_burst_command_pending_ = false;
+    std::optional<std::string> lidar_mode_command_pending_;
 };
 
 } // namespace sa

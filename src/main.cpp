@@ -1130,7 +1130,8 @@ int runDesktopDemo(const Options& options, RuntimeContext& runtime)
 
 void publishAll(const WorldModel& world, const SensorFrame& frame, Telemetry& telemetry, Haptics& haptics,
                 bool telemetry_enabled, RuntimeContext& runtime,
-                bool scan_available = false, bool scan_active = false)
+                bool scan_available = false, bool scan_active = false,
+                const std::string& scan_mode = "on_demand")
 {
     if (!runtime.breadcrumbs.update(world.pose, frame.timestamp_ms))
         std::cerr << "[sa] breadcrumb update rejected an invalid or stale pose\n";
@@ -1213,7 +1214,7 @@ void publishAll(const WorldModel& world, const SensorFrame& frame, Telemetry& te
     {
         telemetry.publish(world, runtime.markers.latest,
                           wristTelemetry(wrist, runtime.vibrator, runtime.guidance.config()),
-                          runtime.announcer.lastText(), scan_available, scan_active);
+                          runtime.announcer.lastText(), scan_available, scan_active, scan_mode);
     }
 }
 
@@ -1612,6 +1613,7 @@ int runHardware(const Options& options, Telemetry& telemetry, Haptics& haptics, 
     WorldModel last_world{};
     std::string error;
     std::string last_tof_error;
+    std::string lidar_mode = "on_demand";
 
     std::cout << "[sa] hardware mode @" << options.loop_rate_hz << " Hz"
               << " sensors=" << sensorSelectionName(options.sensors)
@@ -1631,6 +1633,41 @@ int runHardware(const Options& options, Telemetry& telemetry, Haptics& haptics, 
         next_tick += period;
         const uint64_t now_ms = monoNowMs();
 
+        std::string requested_lidar_mode;
+        if (telemetry_ok && telemetry.takeLidarModeCommand(requested_lidar_mode))
+        {
+            LidarScanMode requested_mode = LidarScanMode::OnDemand;
+            bool valid_mode = true;
+            if (requested_lidar_mode == "auto")
+                requested_mode = LidarScanMode::Auto;
+            else if (requested_lidar_mode == "continuous")
+                requested_mode = LidarScanMode::Continuous;
+            else if (requested_lidar_mode != "on_demand")
+                valid_mode = false;
+
+            if (!valid_mode)
+            {
+                std::cerr << "[sa] unsupported LiDAR mode request: " << requested_lidar_mode << "\n";
+            }
+            else if (!hardware.lidar_ok || !hardware.lidar)
+            {
+                std::cerr << "[sa] LiDAR mode request rejected: sensor is unavailable\n";
+            }
+            else
+            {
+                std::string mode_error;
+                if (hardware.lidar->setMode(requested_mode, now_ms, mode_error))
+                {
+                    lidar_mode = requested_lidar_mode;
+                    std::cout << "[sa] LiDAR mode set to " << lidar_mode << "\n";
+                }
+                else
+                {
+                    std::cerr << "[sa] LiDAR mode change failed: " << mode_error << "\n";
+                }
+            }
+        }
+
         if (telemetry_ok && telemetry.takeScanBurstCommand())
         {
             std::string scan_error;
@@ -1638,6 +1675,15 @@ int runHardware(const Options& options, Telemetry& telemetry, Haptics& haptics, 
                 std::cout << "[sa] 360-degree LiDAR burst started\n";
             else if (!scan_error.empty())
                 std::cerr << "[sa] LiDAR scan request rejected: " << scan_error << "\n";
+        }
+
+        if (hardware.lidar && hardware.lidar->mode() == LidarScanMode::Auto)
+        {
+            std::string scan_error;
+            if (hardware.lidar->serviceAutoScan(now_ms, scan_error))
+                std::cout << "[sa] automatic 360-degree LiDAR burst started\n";
+            else if (!scan_error.empty())
+                std::cerr << "[sa] automatic LiDAR scan failed: " << scan_error << "\n";
         }
 
         SensorFrame frame;
@@ -1754,7 +1800,10 @@ int runHardware(const Options& options, Telemetry& telemetry, Haptics& haptics, 
             std::cerr << "[sa] recording stopped: " << recorder.error() << "\n";
             recording = false;
         }
-        publishAll(world, filtered, telemetry, haptics, telemetry_ok, runtime);
+        publishAll(world, filtered, telemetry, haptics, telemetry_ok, runtime,
+                   hardware.lidar_ok,
+                   hardware.lidar && hardware.lidar->isScanActive(frame.timestamp_ms),
+                   lidar_mode);
         ++frames;
         logWorld(world, options.verbose && (frames % static_cast<uint64_t>(options.loop_rate_hz) == 0));
 

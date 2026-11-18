@@ -87,6 +87,9 @@ bool LidarDriver::open(std::string& error)
     motor_powered_ = false;
     burst_active_ = false;
     burst_completion_pending_ = false;
+    continuous_active_ = false;
+    mode_ = LidarScanMode::OnDemand;
+    next_auto_scan_ms_ = 0;
     error.clear();
     return true;
 }
@@ -101,6 +104,9 @@ void LidarDriver::close()
     motor_powered_ = false;
     burst_active_ = false;
     burst_completion_pending_ = false;
+    continuous_active_ = false;
+    mode_ = LidarScanMode::OnDemand;
+    next_auto_scan_ms_ = 0;
     motor_line_.close();
     serial_.close();
     input_buffer_.clear();
@@ -115,6 +121,11 @@ bool LidarDriver::triggerScanBurst(uint64_t timestamp_ms, float duration_sec)
 bool LidarDriver::triggerScanBurst(uint64_t timestamp_ms, float duration_sec, std::string& error)
 {
     error.clear();
+    if (mode_ == LidarScanMode::Continuous)
+    {
+        error = "LiDAR burst unavailable while continuous mode is active";
+        return false;
+    }
     if (!config_.enabled || (config_.power_gate_enabled && !motor_line_.isOpen()) ||
         (!serial_.isOpen() && config_.power_gate_enabled))
     {
@@ -143,6 +154,56 @@ bool LidarDriver::triggerScanBurst(uint64_t timestamp_ms, float duration_sec, st
     motor_powered_ = true;
     input_buffer_.clear();
     return true;
+}
+
+bool LidarDriver::setMode(LidarScanMode mode, uint64_t timestamp_ms, std::string& error)
+{
+    error.clear();
+    if (mode == mode_) return true;
+
+    if (mode == LidarScanMode::Continuous)
+    {
+        if (!config_.enabled || (config_.power_gate_enabled &&
+                                 (!serial_.isOpen() || !motor_line_.isOpen())))
+        {
+            error = "continuous LiDAR mode unavailable; driver or motor power gate is not open";
+            return false;
+        }
+        if (config_.power_gate_enabled && !motor_line_.set(true, error)) return false;
+
+        burst_active_ = false;
+        burst_completion_pending_ = false;
+        continuous_active_ = true;
+        continuous_start_ms_ = timestamp_ms;
+        motor_powered_ = true;
+        input_buffer_.clear();
+    }
+    else if (continuous_active_)
+    {
+        if (config_.power_gate_enabled && motor_line_.isOpen() && !motor_line_.set(false, error))
+            return false;
+        continuous_active_ = false;
+        motor_powered_ = false;
+        input_buffer_.clear();
+    }
+
+    mode_ = mode;
+    next_auto_scan_ms_ = mode == LidarScanMode::Auto ? timestamp_ms : 0;
+    return true;
+}
+
+bool LidarDriver::serviceAutoScan(uint64_t timestamp_ms, std::string& error)
+{
+    error.clear();
+    if (mode_ != LidarScanMode::Auto || timestamp_ms < next_auto_scan_ms_) return false;
+    if (timestamp_ms > std::numeric_limits<uint64_t>::max() - kDefaultLidarAutoIntervalMs)
+    {
+        error = "LiDAR auto-scan schedule overflows its timestamp";
+        return false;
+    }
+
+    next_auto_scan_ms_ = timestamp_ms + kDefaultLidarAutoIntervalMs;
+    return triggerScanBurst(timestamp_ms, kDefaultLidarBurstDurationSec, error);
 }
 
 bool LidarDriver::isBurstActive(uint64_t timestamp_ms) const
@@ -256,12 +317,14 @@ bool LidarDriver::ingestBytes(const uint8_t* data, std::size_t size, uint64_t ti
     scan = LidarScan{};
     error.clear();
     if (!updateBurst(timestamp_ms, error)) return false;
-    if (!isBurstActive(timestamp_ms))
+    const bool continuous_scan = continuous_active_;
+    const uint64_t scan_start_ms = continuous_scan ? continuous_start_ms_ : burst_start_ms_;
+    if (!continuous_scan && !isBurstActive(timestamp_ms))
     {
         input_buffer_.clear();
         return false;
     }
-    if (timestamp_ms - burst_start_ms_ < kLidarSpinupDiscardMs)
+    if (timestamp_ms - scan_start_ms < kLidarSpinupDiscardMs)
     {
         input_buffer_.clear();
         return false;
@@ -366,7 +429,7 @@ bool LidarDriver::ingestBytes(const uint8_t* data, std::size_t size, uint64_t ti
     if (scan.points.empty()) return false;
     scan.timestamp_ms = timestamp_ms;
     scan.origin = config_.mount_translation_m;
-    scan.burst_active = burst_active_;
+    scan.burst_active = burst_active_ && !continuous_scan;
     return true;
 }
 
@@ -388,12 +451,12 @@ bool LidarDriver::poll(uint64_t timestamp_ms, LidarScan& scan, std::string& erro
         burst_completion_pending_ = false;
         return true;
     }
-    if (!burst_active_) return false;
+    if (!burst_active_ && !continuous_active_) return false;
 
     std::vector<uint8_t> incoming;
     if (!serial_.readAvailable(incoming, error)) return false;
     if (!ingestBytes(incoming.data(), incoming.size(), timestamp_ms, scan, error)) return false;
-    scan.burst_active = burst_active_;
+    scan.burst_active = burst_active_ && !continuous_active_;
     return true;
 }
 
